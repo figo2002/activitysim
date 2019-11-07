@@ -1,43 +1,46 @@
 # ActivitySim
 # See full license in LICENSE.txt.
 
+from __future__ import (absolute_import, division, print_function, )
+from future.standard_library import install_aliases
+install_aliases()  # noqa: E402
+
 import logging
-import os
 
 import pandas as pd
 
-from activitysim.core import simulate as asim
+from activitysim.core import simulate
 from activitysim.core import tracing
 from activitysim.core import pipeline
 from activitysim.core import config
 from activitysim.core import inject
 
-from .util.cdap import run_cdap
+from .util import cdap
 from .util import expressions
 
 logger = logging.getLogger(__name__)
 
 
 @inject.injectable()
-def cdap_indiv_spec(configs_dir):
+def cdap_indiv_spec():
     """
     spec to compute the activity utilities for each individual hh member
     with no interactions with other household members taken into account
     """
-    return asim.read_model_spec(configs_dir, 'cdap_indiv_and_hhsize1.csv')
+    return simulate.read_model_spec(file_name='cdap_indiv_and_hhsize1.csv')
 
 
 @inject.injectable()
-def cdap_interaction_coefficients(configs_dir):
+def cdap_interaction_coefficients():
     """
     Rules and coefficients for generating interaction specs for different household sizes
     """
-    f = os.path.join(configs_dir, 'cdap_interaction_coefficients.csv')
+    f = config.config_file_path('cdap_interaction_coefficients.csv')
     return pd.read_csv(f, comment='#')
 
 
 @inject.injectable()
-def cdap_fixed_relative_proportions(configs_dir):
+def cdap_fixed_relative_proportions():
     """
     spec to compute/specify the relative proportions of each activity (M, N, H)
     that should be used to choose activities for additional household members
@@ -47,7 +50,7 @@ def cdap_fixed_relative_proportions(configs_dir):
     EXCEPT that the values computed are relative proportions, not utilities
     (i.e. values are not exponentiated before being normalized to probabilities summing to 1.0)
     """
-    return asim.read_model_spec(configs_dir, 'cdap_fixed_relative_proportions.csv')
+    return simulate.read_model_spec(file_name='cdap_fixed_relative_proportions.csv')
 
 
 @inject.step()
@@ -73,16 +76,29 @@ def cdap_simulate(persons_merged, persons, households,
 
     constants = config.get_model_constants(model_settings)
 
-    logger.info("Running cdap_simulate with %d persons" % len(persons_merged.index))
+    cdap_interaction_coefficients = \
+        cdap.preprocess_interaction_coefficients(cdap_interaction_coefficients)
 
-    choices = run_cdap(persons=persons_merged,
-                       cdap_indiv_spec=cdap_indiv_spec,
-                       cdap_interaction_coefficients=cdap_interaction_coefficients,
-                       cdap_fixed_relative_proportions=cdap_fixed_relative_proportions,
-                       locals_d=constants,
-                       chunk_size=chunk_size,
-                       trace_hh_id=trace_hh_id,
-                       trace_label=trace_label)
+    # specs are built just-in-time on demand and cached as injectables
+    # prebuilding here allows us to write them to the output directory
+    # (also when multiprocessing locutor might not see all household sizes)
+    logger.info("Pre-building cdap specs")
+    for hhsize in range(2, cdap.MAX_HHSIZE + 1):
+        spec = cdap.build_cdap_spec(cdap_interaction_coefficients, hhsize, cache=True)
+        if inject.get_injectable('locutor', False):
+            spec.to_csv(config.output_file_path('cdap_spec_%s.csv' % hhsize), index=True)
+
+    logger.info("Running cdap_simulate with %d persons", len(persons_merged.index))
+
+    choices = cdap.run_cdap(
+        persons=persons_merged,
+        cdap_indiv_spec=cdap_indiv_spec,
+        cdap_interaction_coefficients=cdap_interaction_coefficients,
+        cdap_fixed_relative_proportions=cdap_fixed_relative_proportions,
+        locals_d=constants,
+        chunk_size=chunk_size,
+        trace_hh_id=trace_hh_id,
+        trace_label=trace_label)
 
     # - assign results to persons table and annotate
     persons = persons.to_frame()
@@ -107,7 +123,8 @@ def cdap_simulate(persons_merged, persons, households,
     pipeline.replace_table("households", households)
 
     tracing.print_summary('cdap_activity', persons.cdap_activity, value_counts=True)
-    print pd.crosstab(persons.ptype, persons.cdap_activity, margins=True)
+    logger.info("cdap crosstabs:\n%s" %
+                pd.crosstab(persons.ptype, persons.cdap_activity, margins=True))
 
     if trace_hh_id:
 
