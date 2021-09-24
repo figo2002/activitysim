@@ -5,7 +5,7 @@
 import pytest
 import os
 import pandas as pd
-import pandas.util.testing as pdt
+import pandas.testing as pdt
 from ..tour_frequency import process_non_mandatory_tours
 
 
@@ -15,7 +15,7 @@ def test_nmtf():
         {
             'non_mandatory_tour_frequency': [0, 3, 2, 1],
             'household_id': [1, 1, 2, 4],
-            'home_taz': [100, 100, 200, 400]
+            'home_zone_id': [100, 100, 200, 400]
         },
         index=[0, 1, 2, 3]
     )

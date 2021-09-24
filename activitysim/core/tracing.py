@@ -1,18 +1,15 @@
 # ActivitySim
 # See full license in LICENSE.txt.
 
-from __future__ import (absolute_import, division, print_function, )
-from future.standard_library import install_aliases
-install_aliases()  # noqa: E402
 from builtins import next
 from builtins import range
 
+import multiprocessing  # for process name
 import os
 import logging
 import logging.config
 import sys
 import time
-
 import yaml
 
 import numpy as np
@@ -55,6 +52,25 @@ def print_elapsed_time(msg=None, t0=None, debug=False):
     return t1
 
 
+def log_runtime(model_name, start_time=None, timing=None):
+
+    assert (start_time or timing) and not (start_time and timing)
+
+    timing = timing if timing else time.time() - start_time
+    seconds = round(timing, 1)
+    minutes = round(timing / 60, 1)
+
+    process_name = multiprocessing.current_process().name
+
+    # only log runtime for locutor
+    if config.setting('multiprocess', False) and not inject.get_injectable('locutor', False):
+        return
+
+    header = "process_name,model_name,seconds,minutes"
+    with config.open_log_file('timing_log.csv', 'a', header) as log_file:
+        print(f"{process_name},{model_name},{seconds},{minutes}", file=log_file)
+
+
 def delete_output_files(file_type, ignore=None, subdir=None):
     """
     Delete files in output directory of specified type
@@ -71,7 +87,8 @@ def delete_output_files(file_type, ignore=None, subdir=None):
 
     output_dir = inject.get_injectable('output_dir')
 
-    directories = ['', 'log', 'trace']
+    subdir = [subdir] if subdir else None
+    directories = subdir or ['', 'log', 'trace']
 
     for subdir in directories:
 
@@ -90,17 +107,17 @@ def delete_output_files(file_type, ignore=None, subdir=None):
                 file_path = os.path.join(dir, the_file)
 
                 if ignore and os.path.realpath(file_path) in ignore:
-                    logger.debug("delete_output_files ignoring %s" % file_path)
                     continue
 
                 try:
                     if os.path.isfile(file_path):
+                        logger.debug("delete_output_files deleting %s" % file_path)
                         os.unlink(file_path)
                 except Exception as e:
                     print(e)
 
 
-def delete_csv_files():
+def delete_trace_files():
     """
     Delete CSV files in output_dir
 
@@ -108,7 +125,12 @@ def delete_csv_files():
     -------
     Nothing
     """
-    delete_output_files(CSV_FILE_TYPE)
+    delete_output_files(CSV_FILE_TYPE, subdir='trace')
+    delete_output_files(CSV_FILE_TYPE, subdir='log')
+
+    active_log_files = [h.baseFilename for h in logger.root.handlers if isinstance(h, logging.FileHandler)]
+
+    delete_output_files('log', ignore=active_log_files)
 
 
 def config_logger(basic=False):
@@ -123,17 +145,27 @@ def config_logger(basic=False):
     """
 
     # look for conf file in configs_dir
-    log_config_file = None
-    if not basic:
+    if basic:
+        log_config_file = None
+    else:
         log_config_file = config.config_file_path(LOGGING_CONF_FILE_NAME, mandatory=False)
 
     if log_config_file:
-        with open(log_config_file) as f:
-            # FIXME need alternative to yaml.UnsafeLoader?
-            config_dict = yaml.load(f, Loader=yaml.UnsafeLoader)
+        try:
+            with open(log_config_file) as f:
+                config_dict = yaml.load(f, Loader=yaml.UnsafeLoader)
+        except Exception as e:
+            print(f"Unable to read logging config file {log_config_file}")
+            raise e
+
+        try:
             config_dict = config_dict['logging']
             config_dict.setdefault('version', 1)
             logging.config.dictConfig(config_dict)
+        except Exception as e:
+            print(f"Unable to config logging as specified in {log_config_file}")
+            raise e
+
     else:
         logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
@@ -177,6 +209,14 @@ def print_summary(label, df, describe=False, value_counts=False):
         logger.info("%s summary:\n%s" % (label, df.describe()))
 
 
+def initialize_traceable_tables():
+
+    traceable_table_ids = inject.get_injectable('traceable_table_ids', {})
+    if len(traceable_table_ids) > 0:
+        logger.debug(f"initialize_traceable_tables resetting table_ids for {list(traceable_table_ids.keys())}")
+    inject.add_injectable('traceable_table_ids', {})
+
+
 def register_traceable_table(table_name, df):
     """
     Register traceable table
@@ -191,12 +231,9 @@ def register_traceable_table(table_name, df):
     Nothing
     """
 
-    trace_hh_id = inject.get_injectable("trace_hh_id", None)
+    # add index name to traceable_table_indexes
 
-    new_traced_ids = []
-
-    if trace_hh_id is None:
-        return
+    logger.debug(f"register_traceable_table {table_name}")
 
     traceable_tables = inject.get_injectable('traceable_tables', [])
     if table_name not in traceable_tables:
@@ -208,14 +245,27 @@ def register_traceable_table(table_name, df):
         logger.error("Can't register table '%s' without index name" % table_name)
         return
 
-    traceable_table_ids = inject.get_injectable('traceable_table_ids')
-    traceable_table_indexes = inject.get_injectable('traceable_table_indexes')
+    traceable_table_ids = inject.get_injectable('traceable_table_ids', {})
+    traceable_table_indexes = inject.get_injectable('traceable_table_indexes', {})
 
     if idx_name in traceable_table_indexes and traceable_table_indexes[idx_name] != table_name:
         logger.error("table '%s' index name '%s' already registered for table '%s'" %
                      (table_name, idx_name, traceable_table_indexes[idx_name]))
         return
 
+    # update traceable_table_indexes with this traceable_table's idx_name
+    if idx_name not in traceable_table_indexes:
+        traceable_table_indexes[idx_name] = table_name
+        logger.debug("adding table %s.%s to traceable_table_indexes" % (table_name, idx_name))
+        inject.add_injectable('traceable_table_indexes', traceable_table_indexes)
+
+    # add any new indexes associated with trace_hh_id to traceable_table_ids
+
+    trace_hh_id = inject.get_injectable("trace_hh_id", None)
+    if trace_hh_id is None:
+        return
+
+    new_traced_ids = []
     if table_name == 'households':
         if trace_hh_id not in df.index:
             logger.warning("trace_hh_id %s not in dataframe" % trace_hh_id)
@@ -227,6 +277,7 @@ def register_traceable_table(table_name, df):
 
         # find first already registered ref_col we can use to slice this table
         ref_col = next((c for c in traceable_table_indexes if c in df.columns), None)
+
         if ref_col is None:
             logger.error("can't find a registered table to slice table '%s' index name '%s'"
                          " in traceable_table_indexes: %s" %
@@ -245,12 +296,6 @@ def register_traceable_table(table_name, df):
             logger.warning("register %s: no rows with %s in %s." %
                            (table_name, ref_col, ref_col_traced_ids))
 
-    # update traceable_table_indexes with this traceable_table's idx_name
-    if idx_name not in traceable_table_indexes:
-        traceable_table_indexes[idx_name] = table_name
-        print("adding table %s.%s to traceable_table_indexes" % (table_name, idx_name))
-        inject.add_injectable('traceable_table_indexes', traceable_table_indexes)
-
     # update the list of trace_ids for this table
     prior_traced_ids = traceable_table_ids.get(table_name, [])
 
@@ -259,10 +304,10 @@ def register_traceable_table(table_name, df):
         traceable_table_ids[table_name] = prior_traced_ids + new_traced_ids
         inject.add_injectable('traceable_table_ids', traceable_table_ids)
 
-    logger.info("register %s: added %s new ids to %s existing trace ids" %
-                (table_name, len(new_traced_ids), len(prior_traced_ids)))
-    logger.info("register %s: tracing new ids %s in %s" %
-                (table_name, new_traced_ids, table_name))
+    logger.debug("register %s: added %s new ids to %s existing trace ids" %
+                 (table_name, len(new_traced_ids), len(prior_traced_ids)))
+    logger.debug("register %s: tracing new ids %s in %s" %
+                 (table_name, new_traced_ids, table_name))
 
 
 def write_df_csv(df, file_path, index_label=None, columns=None, column_labels=None, transpose=True):
@@ -273,7 +318,8 @@ def write_df_csv(df, file_path, index_label=None, columns=None, column_labels=No
         df = df[columns]
 
     if not transpose:
-        df.to_csv(file_path, mode='a', index=df.index.name is not None, header=need_header)
+        want_index = isinstance(df.index, pd.MultiIndex) or df.index.name is not None
+        df.to_csv(file_path, mode='a', index=want_index, header=need_header)
         return
 
     df_t = df.transpose() if df.index.name in df else df.reset_index().transpose()
@@ -346,6 +392,12 @@ def write_csv(df, file_name, index_label=None, columns=None, column_labels=None,
 
     file_path = config.trace_file_path(file_name)
 
+    if os.name == 'nt':
+        abs_path = os.path.abspath(file_path)
+        if len(abs_path) > 255:
+            msg = f"path length ({len(abs_path)}) may exceed Windows maximum length unless LongPathsEnabled: {abs_path}"
+            logger.warning(msg)
+
     if os.path.isfile(file_path):
         logger.debug("write_csv file exists %s %s" % (type(df).__name__, file_name))
 
@@ -399,7 +451,7 @@ def slice_ids(df, ids, column=None):
     return df
 
 
-def get_trace_target(df, slicer):
+def get_trace_target(df, slicer, column=None):
     """
     get target ids and column or index to identify target trace rows in df
 
@@ -421,7 +473,6 @@ def get_trace_target(df, slicer):
     """
 
     target_ids = None  # id or ids to slice by (e.g. hh_id or person_ids or tour_ids)
-    column = None  # column name to slice on or None to slice on index
 
     # special do-not-slice code for dumping entire df
     if slicer == 'NONE':
@@ -449,15 +500,15 @@ def get_trace_target(df, slicer):
         # maps 'person_id' to 'persons', etc
         table_name = traceable_table_indexes[slicer]
         target_ids = traceable_table_ids.get(table_name, [])
-    elif slicer == 'TAZ':
+    elif slicer == 'zone_id':
         target_ids = inject.get_injectable('trace_od', [])
 
     return target_ids, column
 
 
-def trace_targets(df, slicer=None):
+def trace_targets(df, slicer=None, column=None):
 
-    target_ids, column = get_trace_target(df, slicer)
+    target_ids, column = get_trace_target(df, slicer, column)
 
     if target_ids is None:
         targets = None
@@ -466,14 +517,15 @@ def trace_targets(df, slicer=None):
         if column is None:
             targets = df.index.isin(target_ids)
         else:
-            targets = df[column].isin(target_ids)
+            # convert to numpy array for consistency since that is what index.isin returns
+            targets = df[column].isin(target_ids).to_numpy()
 
     return targets
 
 
-def has_trace_targets(df, slicer=None):
+def has_trace_targets(df, slicer=None, column=None):
 
-    target_ids, column = get_trace_target(df, slicer)
+    target_ids, column = get_trace_target(df, slicer, column)
 
     if target_ids is None:
         found = False
@@ -505,10 +557,38 @@ def hh_id_for_chooser(id, choosers):
     elif 'household_id' in choosers.columns:
         hh_id = choosers.loc[id]['household_id']
     else:
-        print(": hh_id_for_chooser: nada, \n", choosers.columns)
+        print(": hh_id_for_chooser: nada:\n%s" % choosers.columns)
         hh_id = None
 
     return hh_id
+
+
+def trace_id_for_chooser(id, choosers):
+    """
+
+    Parameters
+    ----------
+    id - scalar id (or list of ids) from chooser index
+    choosers - pandas dataframe whose index contains ids
+
+    Returns
+    -------
+        scalar household_id or series of household_ids
+    """
+
+    hh_id = None
+    for column_name in ['household_id', 'person_id']:
+        if choosers.index.name == column_name:
+            hh_id = id
+            break
+        elif column_name in choosers.columns:
+            hh_id = choosers.loc[id][column_name]
+            break
+
+    if hh_id is None:
+        print(": hh_id_for_chooser: nada:\n%s" % choosers.columns)
+
+    return hh_id, column_name
 
 
 def dump_df(dump_switch, df, trace_label, fname):

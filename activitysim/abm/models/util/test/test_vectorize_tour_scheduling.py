@@ -6,12 +6,22 @@ import pytest
 import pandas as pd
 import numpy as np
 
-import pandas.util.testing as pdt
+import pandas.testing as pdt
 
 from activitysim.core import inject
 
 from ..vectorize_tour_scheduling import get_previous_tour_by_tourid, \
     vectorize_tour_scheduling
+
+
+def teardown_function(func):
+    inject.clear_cache()
+    inject.reinject_decorated_tables()
+
+
+def setup_function():
+    output_dir = os.path.join(os.path.dirname(__file__), 'output')
+    inject.add_injectable("output_dir", output_dir)
 
 
 def test_vts():
@@ -59,12 +69,15 @@ def test_vts():
     spec = pd.DataFrame({"Coefficient": [1.2]},
                         index=["income"])
     spec.index.name = "Expression"
-    segment_col = None  # no segmentation of model_spec
 
     inject.add_injectable("check_for_variability", True)
 
-    tdd_choices, timetable = vectorize_tour_scheduling(
-        tours, persons, alts, spec, segment_col,
+    timetable = inject.get_injectable("timetable")
+
+    tdd_choices = vectorize_tour_scheduling(
+        tours, persons, alts, timetable,
+        tour_segments={'spec': spec},
+        tour_segment_col=None,
         model_settings={},
         chunk_size=0, trace_label='test_vts')
 
@@ -73,4 +86,4 @@ def test_vts():
     # note that the result comes out ordered by the nth trips and not ordered
     # by the trip index.  shrug?
     expected = [2, 2, 2, 0, 0]
-    assert (tdd_choices.tdd.values == expected).all()
+    assert (tdd_choices.values == expected).all()

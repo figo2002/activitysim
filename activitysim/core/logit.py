@@ -1,9 +1,5 @@
 # ActivitySim
 # See full license in LICENSE.txt.
-
-from __future__ import (absolute_import, division, print_function, )
-from future.standard_library import install_aliases
-install_aliases()  # noqa: E402
 from builtins import object
 
 import logging
@@ -13,8 +9,15 @@ import pandas as pd
 
 from . import tracing
 from . import pipeline
+from . import config
 
 logger = logging.getLogger(__name__)
+
+EXP_UTIL_MIN = 1e-300
+EXP_UTIL_MAX = np.inf
+
+PROB_MIN = 0.0
+PROB_MAX = 1.0
 
 
 def report_bad_choices(bad_row_map, df, trace_label, msg, trace_choosers=None, raise_error=True):
@@ -39,15 +42,15 @@ def report_bad_choices(bad_row_map, df, trace_label, msg, trace_choosers=None, r
     MAX_DUMP = 1000
     MAX_PRINT = 10
 
-    msg_with_count = "%s %s for %s rows" % (trace_label, msg, bad_row_map.sum())
+    msg_with_count = "%s %s for %s of %s rows" % (trace_label, msg, bad_row_map.sum(), len(df))
     logger.warning(msg_with_count)
 
     df = df[bad_row_map]
     if trace_choosers is None:
-        hh_ids = tracing.hh_id_for_chooser(df.index, df)
+        hh_ids, trace_col = tracing.trace_id_for_chooser(df.index, df)
     else:
-        hh_ids = tracing.hh_id_for_chooser(df.index, trace_choosers)
-    df['household_id'] = hh_ids
+        hh_ids, trace_col = tracing.trace_id_for_chooser(df.index, trace_choosers)
+    df[trace_col] = hh_ids
 
     if trace_label:
         logger.info("dumping %s" % trace_label)
@@ -59,12 +62,49 @@ def report_bad_choices(bad_row_map, df, trace_label, msg, trace_choosers=None, r
     for idx in df.index[:MAX_PRINT].values:
 
         row_msg = "%s : %s in: %s = %s (hh_id = %s)" % \
-                  (trace_label, msg, df.index.name, idx, df.household_id.loc[idx])
+                  (trace_label, msg, df.index.name, idx, df[trace_col].loc[idx])
 
         logger.warning(row_msg)
 
     if raise_error:
         raise RuntimeError(msg_with_count)
+
+
+def utils_to_logsums(utils, exponentiated=False, allow_zero_probs=False):
+    """
+    Convert a table of utilities to logsum series.
+
+    Parameters
+    ----------
+    utils : pandas.DataFrame
+        Rows should be choosers and columns should be alternatives.
+
+    exponentiated : bool
+        True if utilities have already been exponentiated
+
+    Returns
+    -------
+    logsums : pandas.Series
+        Will have the same index as `utils`.
+
+    """
+
+    # fixme - conversion to float not needed in either case?
+    # utils_arr = utils.values.astype('float')
+    utils_arr = utils.values
+    if not exponentiated:
+        utils_arr = np.exp(utils_arr)
+
+    np.clip(utils_arr, EXP_UTIL_MIN, EXP_UTIL_MAX, out=utils_arr)
+
+    utils_arr = np.where(utils_arr == EXP_UTIL_MIN, 0.0, utils_arr)
+
+    with np.errstate(divide='ignore' if allow_zero_probs else 'warn'):
+        logsums = np.log(utils_arr.sum(axis=1))
+
+    logsums = pd.Series(logsums, index=utils.index)
+
+    return logsums
 
 
 def utils_to_probs(utils, trace_label=None, exponentiated=False, allow_zero_probs=False,
@@ -107,8 +147,6 @@ def utils_to_probs(utils, trace_label=None, exponentiated=False, allow_zero_prob
     if not exponentiated:
         utils_arr = np.exp(utils_arr)
 
-    EXP_UTIL_MIN = 1e-300
-    EXP_UTIL_MAX = np.inf
     np.clip(utils_arr, EXP_UTIL_MIN, EXP_UTIL_MAX, out=utils_arr)
 
     # FIXME
@@ -136,9 +174,6 @@ def utils_to_probs(utils, trace_label=None, exponentiated=False, allow_zero_prob
                      divide='ignore' if allow_zero_probs else 'warn'):
         np.divide(utils_arr, arr_sum.reshape(len(utils_arr), 1), out=utils_arr)
 
-    PROB_MIN = 0.0
-    PROB_MAX = 1.0
-
     # if allow_zero_probs, this will cause EXP_UTIL_MIN util rows to have all zero probabilities
     utils_arr[np.isnan(utils_arr)] = PROB_MIN
 
@@ -149,7 +184,7 @@ def utils_to_probs(utils, trace_label=None, exponentiated=False, allow_zero_prob
     return probs
 
 
-def make_choices(probs, trace_label=None, trace_choosers=None):
+def make_choices(probs, trace_label=None, trace_choosers=None, allow_bad_probs=False):
     """
     Make choices for each chooser from among a set of alternatives.
 
@@ -184,7 +219,7 @@ def make_choices(probs, trace_label=None, trace_choosers=None):
         probs.sum(axis=1).sub(np.ones(len(probs.index))).abs() \
         > BAD_PROB_THRESHOLD * np.ones(len(probs.index))
 
-    if bad_probs.any():
+    if bad_probs.any() and not allow_bad_probs:
 
         report_bad_choices(bad_probs, probs,
                            trace_label=tracing.extend_trace_label(trace_label, 'bad_probs'),
@@ -206,13 +241,12 @@ def make_choices(probs, trace_label=None, trace_choosers=None):
     return choices, rands
 
 
-def interaction_dataset(choosers, alternatives, sample_size=None):
+def interaction_dataset(choosers, alternatives, sample_size=None, alt_index_id=None, chooser_index_id=None):
     """
     Combine choosers and alternatives into one table for the purposes
     of creating interaction variables and/or sampling alternatives.
 
-    Any duplicate column names in alternatives table will be renamed with an '_r' suffix.
-    (e.g. TAZ field in alternatives will appear as TAZ_r so that it can be targeted in a skim)
+    Any duplicate column names in choosers table will be renamed with an '_chooser' suffix.
 
     Parameters
     ----------
@@ -253,6 +287,11 @@ def interaction_dataset(choosers, alternatives, sample_size=None):
 
     alts_sample = alternatives.take(sample).copy()
 
+    if alt_index_id:
+        # if alt_index_id column name specified, add alt index as a column to interaction dataset
+        # permits identification of alternative row in the joined dataset
+        alts_sample[alt_index_id] = alts_sample.index
+
     logger.debug("interaction_dataset pre-merge choosers %s alternatives %s alts_sample %s" %
                  (choosers.shape, alternatives.shape, alts_sample.shape))
 
@@ -261,6 +300,11 @@ def interaction_dataset(choosers, alternatives, sample_size=None):
     for c in choosers.columns:
         c_chooser = (c + '_chooser') if c in alts_sample.columns else c
         alts_sample[c_chooser] = np.repeat(choosers[c].values, sample_size)
+
+    # caller may want this to detect utils that make all alts for a chooser unavailable (e.g. -999)
+    if chooser_index_id:
+        assert chooser_index_id not in alts_sample
+        alts_sample[chooser_index_id] = np.repeat(choosers.index.values, sample_size)
 
     logger.debug("interaction_dataset merged alts_sample %s" % (alts_sample.shape, ))
 
@@ -287,6 +331,10 @@ class Nest(object):
         self.alternatives = None
         self.coefficient = 0
 
+    def print(self):
+        print("Nest name: %s level: %s coefficient: %s product_of_coefficients: %s ancestors: %s" %
+              (self.name, self.level, self.coefficient, self.product_of_coefficients, self.ancestors))
+
     @property
     def is_leaf(self):
         return (self.alternatives is None)
@@ -300,11 +348,27 @@ class Nest(object):
         return ['leaf', 'node']
 
 
+def validate_nest_spec(nest_spec, trace_label):
+
+    keys = []
+    duplicates = []
+    for nest in each_nest(nest_spec):
+        if nest.name in keys:
+            logger.error("validate_nest_spec:duplicate nest key '%s' in nest spec - %s" % (nest.name, trace_label))
+            duplicates.append(nest.name)
+
+        keys.append(nest.name)
+        # nest.print()
+
+    if duplicates:
+        raise RuntimeError("validate_nest_spec:duplicate nest key/s '%s' in nest spec - %s" % (duplicates, trace_label))
+
+
 def _each_nest(spec, parent_nest, post_order):
     """
     Iterate over each nest or leaf node in the tree (of subtree)
 
-    This internal routine is called by each_nest, which presents a slightly higer level interface
+    This internal routine is called by each_nest, which presents a slightly higher level interface
 
     Parameters
     ----------
@@ -330,6 +394,8 @@ def _each_nest(spec, parent_nest, post_order):
     if isinstance(spec, dict):
         name = spec['name']
         coefficient = spec['coefficient']
+        assert isinstance(coefficient, (int, float)), \
+            "Coefficient '%s' (%s) not a number" % (name, coefficient)  # forgot to eval coefficient?
         alternatives = [a['name'] if isinstance(a, dict) else a for a in spec['alternatives']]
 
         nest = Nest(name=name)
@@ -391,14 +457,16 @@ def each_nest(nest_spec, type=None, post_order=False):
             yield nest
 
 
-def count_nests(nest_spec, type=None):
+def count_nests(nest_spec):
     """
-    count the nests of the specified type (or all nests if type is None)
-    return 0 if nest_spec is none
+    count the nests in nest_spec, return 0 if nest_spec is none
     """
-    count = 0
-    if nest_spec is not None:
-        for node, nest in _each_nest(nest_spec, parent_nest=Nest(), post_order=False):
-            if type is None or nest.type == type:
-                count += 1
-    return count
+
+    def count_each_nest(spec, count):
+        if isinstance(spec, dict):
+            return count + 1 + sum([count_each_nest(alt, count) for alt in spec['alternatives']])
+        else:
+            assert isinstance(spec, str)
+            return 1
+
+    return count_each_nest(nest_spec, 0) if nest_spec is not None else 0

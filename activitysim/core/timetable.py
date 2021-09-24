@@ -1,9 +1,6 @@
 # ActivitySim
 # See full license in LICENSE.txt.
 
-from __future__ import (absolute_import, division, print_function, )
-from future.standard_library import install_aliases
-install_aliases()  # noqa: E402
 from builtins import range
 from builtins import object
 
@@ -12,10 +9,8 @@ import logging
 import numpy as np
 import pandas as pd
 
-from activitysim.core import config
 from activitysim.core import pipeline
-from activitysim.core import tracing
-from activitysim.core import util
+from activitysim.core import chunk
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +127,7 @@ def create_timetable_windows(rows, tdd_alts):
 
     Parameters
     ----------
-    rows - pd.DataFrame or Series or orca.DataFrameWrapper
+    rows - pd.DataFrame or Series
         all we care about is the index
     tdd_alts - pd.DataFrame
         We expect a start and end column, and create a timetable to accomodate all alts
@@ -196,6 +191,7 @@ class TimeTable(object):
 
         self.windows_df = windows_df
         self.windows = self.windows_df.values
+        self.checkpoint_df = None
 
         # series to map window row index value to window row's ordinal index
         self.window_row_ix = pd.Series(list(range(len(windows_df.index))), index=windows_df.index)
@@ -217,6 +213,29 @@ class TimeTable(object):
         # we want range index so we can use raw numpy
         assert (tdd_alts_df.index == list(range(tdd_alts_df.shape[0]))).all()
         self.tdd_footprints = np.asanyarray([list(r) for r in w_strings]).astype(int)
+
+    def begin_transaction(self, transaction_loggers):
+        """
+        begin a transaction for an estimator or list of estimators
+        this permits rolling timetable back to the state at the start of the transaction
+        so that timetables can be built for scheduling override choices
+        """
+        if not isinstance(transaction_loggers, list):
+            transaction_loggers = [transaction_loggers]
+        for transaction_logger in transaction_loggers:
+            transaction_logger.log("timetable.begin_transaction %s" % self.windows_table_name)
+        self.checkpoint_df = self.windows_df.copy()
+        self.transaction_loggers = transaction_loggers
+        pass
+
+    def rollback(self):
+        assert self.checkpoint_df is not None
+        for logger in self.transaction_loggers:
+            logger.log("timetable.rollback %s" % self.windows_table_name)
+        self.windows_df = self.checkpoint_df
+        self.windows = self.windows_df.values
+        self.checkpoint_df = None
+        self.transaction_loggers = None
 
     def slice_windows_by_row_id(self, window_row_ids):
         """
@@ -260,6 +279,11 @@ class TimeTable(object):
         """
 
         assert self.windows_table_name is not None
+        if self.checkpoint_df is not None:
+            for logger in self.transaction_loggers.values():
+                logger.log("Attempt to replace_table while in transaction: %s" %
+                           self.windows_table_name, level=logging.ERROR)
+            raise RuntimeError("Attempt to replace_table while in transaction")
 
         # get windows_df from bottleneck function in case updates to self.person_window
         # do not write through to pandas dataframe
@@ -421,35 +445,44 @@ class TimeTable(object):
         """
         assert len(window_row_ids) == len(periods)
 
-        time_col_ixs = periods.map(self.time_ix).values
+        trace_label = 'tt.adjacent_window_run_length'
+        with chunk.chunk_log(trace_label):
 
-        # sliced windows with 1s where windows state is I_MIDDLE and 0s elsewhere
-        available = (self.slice_windows_by_row_id(window_row_ids) != I_MIDDLE) * 1
+            time_col_ixs = periods.map(self.time_ix).values
+            chunk.log_df(trace_label, 'time_col_ixs', time_col_ixs)
 
-        # padding periods not available
-        available[:, 0] = 0
-        available[:, -1] = 0
+            # sliced windows with 1s where windows state is I_MIDDLE and 0s elsewhere
+            available = (self.slice_windows_by_row_id(window_row_ids) != I_MIDDLE) * 1
+            chunk.log_df(trace_label, 'available', available)
 
-        # column idxs of windows
-        num_rows, num_cols = available.shape
-        time_col_ix_map = np.tile(np.arange(0, num_cols), num_rows).reshape(num_rows, num_cols)
-        # 0 1 2 3 4 5...
-        # 0 1 2 3 4 5...
-        # 0 1 2 3 4 5...
+            # padding periods not available
+            available[:, 0] = 0
+            available[:, -1] = 0
 
-        if before:
-            # ones after specified time, zeroes before
-            before_mask = (time_col_ix_map < time_col_ixs.reshape(num_rows, 1)) * 1
-            # index of first unavailable window after time
-            first_unavailable = np.where((1-available)*before_mask, time_col_ix_map, 0).max(axis=1)
-            available_run_length = time_col_ixs - first_unavailable - 1
-        else:
-            # ones after specified time, zeroes before
-            after_mask = (time_col_ix_map > time_col_ixs.reshape(num_rows, 1)) * 1
-            # index of first unavailable window after time
-            first_unavailable = \
-                np.where((1 - available) * after_mask, time_col_ix_map, num_cols).min(axis=1)
-            available_run_length = first_unavailable - time_col_ixs - 1
+            # column idxs of windows
+            num_rows, num_cols = available.shape
+            time_col_ix_map = np.tile(np.arange(0, num_cols), num_rows).reshape(num_rows, num_cols)
+            # 0 1 2 3 4 5...
+            # 0 1 2 3 4 5...
+            # 0 1 2 3 4 5...
+            chunk.log_df(trace_label, 'time_col_ix_map', time_col_ix_map)
+
+            if before:
+                # ones after specified time, zeroes before
+                mask = (time_col_ix_map < time_col_ixs.reshape(num_rows, 1)) * 1
+                # index of first unavailable window after time
+                first_unavailable = np.where((1-available)*mask, time_col_ix_map, 0).max(axis=1)
+                available_run_length = time_col_ixs - first_unavailable - 1
+            else:
+                # ones after specified time, zeroes before
+                mask = (time_col_ix_map > time_col_ixs.reshape(num_rows, 1)) * 1
+                # index of first unavailable window after time
+                first_unavailable = np.where((1 - available) * mask, time_col_ix_map, num_cols).min(axis=1)
+                available_run_length = first_unavailable - time_col_ixs - 1
+
+            chunk.log_df(trace_label, 'mask', mask)
+            chunk.log_df(trace_label, 'first_unavailable', first_unavailable)
+            chunk.log_df(trace_label, 'available_run_length', available_run_length)
 
         return pd.Series(available_run_length, index=window_row_ids.index)
 
@@ -603,3 +636,44 @@ class TimeTable(object):
         available = pd.Series(available, index=window_row_ids.index)
 
         return available
+
+    def max_time_block_available(self, window_row_ids):
+        """
+        determine the length of the maximum time block available in the persons day
+
+        Parameters
+        ----------
+        window_row_ids: pandas.Series
+
+        Returns
+        -------
+            pandas.Series with same index as window_row_ids, and integer max_run_length of
+        """
+
+        # FIXME consider dedupe/redupe window_row_ids for performance
+        # as this may be called for alts with lots of duplicates (e.g. trip scheduling time pressure calculations)
+
+        # sliced windows with 1s where windows state is I_MIDDLE and 0s elsewhere
+        available = (self.slice_windows_by_row_id(window_row_ids) != I_MIDDLE) * 1
+
+        # np.set_printoptions(edgeitems=25, linewidth = 180)
+        # print(f"self.slice_windows_by_row_id(window_row_ids)\n{self.slice_windows_by_row_id(window_row_ids)}")
+
+        # padding periods not available
+        available[:, 0] = 0
+        available[:, -1] = 0
+
+        diffs = np.diff(available)  # 1 at start of run of availables, -1 at end, 0 everywhere else
+        start_row_index, starts = np.asarray(diffs > 0).nonzero()  # indices of run starts
+        end_row_index, ends = np.asarray(diffs < 0).nonzero()  # indices of run ends
+        assert (start_row_index == end_row_index).all()  # because bounded, expect same number of starts and ends
+
+        # run_lengths like availability but with run length at start of every run and zeros elsewhere
+        # (row_indices of starts and ends are aligned, so end - start is run_length)
+        run_lengths = np.zeros_like(available)
+        run_lengths[start_row_index, starts] = (ends - starts)
+
+        # we just want to know the the longest one for each window_row_id
+        max_run_lengths = run_lengths.max(axis=1)
+
+        return pd.Series(max_run_lengths, index=window_row_ids.index)

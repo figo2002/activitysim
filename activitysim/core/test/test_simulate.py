@@ -1,13 +1,12 @@
 # ActivitySim
 # See full license in LICENSE.txt.
-from __future__ import print_function
 
 import os.path
 
 import numpy.testing as npt
 import numpy as np
 import pandas as pd
-import pandas.util.testing as pdt
+import pandas.testing as pdt
 import pytest
 
 from .. import inject
@@ -27,11 +26,7 @@ def spec_name(data_dir):
 
 @pytest.fixture(scope='module')
 def spec(data_dir, spec_name):
-    return simulate.read_model_spec(
-        file_name=spec_name,
-        spec_dir=data_dir,
-        description_name='description',
-        expression_name='expression')
+    return simulate.read_model_spec(file_name=spec_name)
 
 
 @pytest.fixture(scope='module')
@@ -39,15 +34,20 @@ def data(data_dir):
     return pd.read_csv(os.path.join(data_dir, 'data.csv'))
 
 
-def test_read_model_spec(data_dir, spec_name):
+def setup_function():
+    configs_dir = os.path.join(os.path.dirname(__file__), 'configs')
+    inject.add_injectable("configs_dir", configs_dir)
 
-    spec = simulate.read_model_spec(
-        file_name=spec_name,
-        spec_dir=data_dir,
-        description_name='description', expression_name='expression')
+    output_dir = os.path.join(os.path.dirname(__file__), f'output')
+    inject.add_injectable("output_dir", output_dir)
+
+
+def test_read_model_spec(spec_name):
+
+    spec = simulate.read_model_spec(file_name=spec_name)
 
     assert len(spec) == 4
-    assert spec.index.name == 'expression'
+    assert spec.index.name == 'Expression'
     assert list(spec.columns) == ['alt0', 'alt1']
     npt.assert_array_equal(
         spec.values,
@@ -69,8 +69,8 @@ def test_eval_variables(spec, data):
     expected[expected.columns[2]] = expected[expected.columns[2]].astype(np.int64)
     expected[expected.columns[3]] = expected[expected.columns[3]].astype(int)
 
-    print("\nexpected\n", expected.dtypes)
-    print("\nresult\n", result.dtypes)
+    print("\nexpected\n%s" % expected.dtypes)
+    print("\nresult\n%s" % result.dtypes)
 
     pdt.assert_frame_equal(result, expected, check_names=False)
 

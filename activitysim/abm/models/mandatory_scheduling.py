@@ -1,11 +1,8 @@
 # ActivitySim
 # See full license in LICENSE.txt.
-
-from __future__ import (absolute_import, division, print_function, )
-from future.standard_library import install_aliases
-install_aliases()  # noqa: E402
-
 import logging
+
+import pandas as pd
 
 from activitysim.core import simulate
 from activitysim.core import tracing
@@ -13,11 +10,13 @@ from activitysim.core import config
 from activitysim.core import inject
 from activitysim.core import pipeline
 from activitysim.core import timetable as tt
+from activitysim.core import expressions
 
 from activitysim.core.util import reindex
 
-from .util import expressions
+from .util import estimation
 from .util import vectorize_tour_scheduling as vts
+from .util.tour_scheduling import run_tour_scheduling
 
 from activitysim.core.util import assign_in_place
 
@@ -36,64 +35,39 @@ def mandatory_tour_scheduling(tours,
     """
     This model predicts the departure time and duration of each activity for mandatory tours
     """
-    trace_label = 'mandatory_tour_scheduling'
-    model_settings = config.read_model_settings('mandatory_tour_scheduling.yaml')
-    logsum_settings = config.read_model_settings(model_settings['LOGSUM_SETTINGS'])
+
+    model_name = 'mandatory_tour_scheduling'
+    trace_label = model_name
+
+    persons_merged = persons_merged.to_frame()
 
     tours = tours.to_frame()
     mandatory_tours = tours[tours.tour_category == 'mandatory']
 
     # - if no mandatory_tours
     if mandatory_tours.shape[0] == 0:
-        tracing.no_results(trace_label)
+        tracing.no_results(model_name)
         return
 
-    persons_merged = persons_merged.to_frame()
-
-    # - filter chooser columns for both logsums and simulate
-    logsum_columns = logsum_settings.get('LOGSUM_CHOOSER_COLUMNS', [])
-    model_columns = model_settings.get('SIMULATE_CHOOSER_COLUMNS', [])
-    chooser_columns = logsum_columns + [c for c in model_columns if c not in logsum_columns]
-    persons_merged = expressions.filter_chooser_columns(persons_merged, chooser_columns)
-
-    # - add primary_purpose column
+    # - add tour segmentation column
     # mtctm1 segments mandatory_scheduling spec by tour_type
     # (i.e. there are different specs for work and school tour_types)
     # mtctm1 logsum coefficients are segmented by primary_purpose
-    # (i.e. there are different locsum coefficents for work, school, univ primary_purposes
+    # (i.e. there are different logsum coefficients for work, school, univ primary_purposes
     # for simplicity managing these different segmentation schemes,
-    # we conflate them by segmenting the skims to align with primary_purpose
-    segment_col = 'primary_purpose'
-    if segment_col not in mandatory_tours:
+    # we conflate them by segmenting tour processing to align with primary_purpose
+    tour_segment_col = 'mandatory_tour_seg'
+    assert tour_segment_col not in mandatory_tours
+    is_university_tour = \
+        (mandatory_tours.tour_type == 'school') & \
+        reindex(persons_merged.is_university, mandatory_tours.person_id)
+    mandatory_tours[tour_segment_col] = \
+        mandatory_tours.tour_type.where(~is_university_tour, 'univ')
 
-        is_university_tour = \
-            (mandatory_tours.tour_type == 'school') & \
-            reindex(persons_merged.is_university, mandatory_tours.person_id)
+    choices = run_tour_scheduling(model_name, mandatory_tours, persons_merged, tdd_alts,
+                                  tour_segment_col, chunk_size, trace_hh_id)
 
-        mandatory_tours['primary_purpose'] = \
-            mandatory_tours.tour_type.where(~is_university_tour, 'univ')
-
-    # - spec dict segmented by primary_purpose
-    work_spec = simulate.read_model_spec(file_name='tour_scheduling_work.csv')
-    school_spec = simulate.read_model_spec(file_name='tour_scheduling_school.csv')
-    segment_specs = {
-        'work': work_spec,
-        'school': school_spec,
-        'univ': school_spec
-    }
-
-    logger.info("Running mandatory_tour_scheduling with %d tours", len(tours))
-    tdd_choices, timetable = vts.vectorize_tour_scheduling(
-        mandatory_tours, persons_merged,
-        tdd_alts,
-        spec=segment_specs, segment_col=segment_col,
-        model_settings=model_settings,
-        chunk_size=chunk_size,
-        trace_label=trace_label)
-
-    timetable.replace_table()
-
-    assign_in_place(tours, tdd_choices)
+    assign_in_place(tours, choices)
     pipeline.replace_table("tours", tours)
 
     # updated df for tracing
@@ -105,7 +79,7 @@ def mandatory_tour_scheduling(tours,
 
     if trace_hh_id:
         tracing.trace_df(mandatory_tours,
-                         label="mandatory_tour_scheduling",
+                         label=trace_label,
                          slicer='person_id',
                          index_label='tour',
                          columns=None,

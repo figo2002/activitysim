@@ -1,17 +1,11 @@
-from __future__ import division
 # ActivitySim
 # See full license in LICENSE.txt.
-from __future__ import (absolute_import, division, print_function, )
-from future.standard_library import install_aliases
-install_aliases()  # noqa: E402
-
 import logging
 import itertools
 import os
 
 import numpy as np
 import pandas as pd
-from zbox import toolz as tz, gen
 
 from activitysim.core import simulate
 from activitysim.core import pipeline
@@ -40,9 +34,6 @@ MAX_HHSIZE = 5
 
 MAX_INTERACTION_CARDINALITY = 3
 
-WORKER_PTYPES = [1, 2]
-CHILD_PTYPES = [6, 7, 8]
-
 
 def set_hh_index(df):
 
@@ -66,7 +57,7 @@ def add_pn(col, pnum):
         raise RuntimeError("add_pn col not list or str")
 
 
-def assign_cdap_rank(persons, trace_hh_id=None, trace_label=None):
+def assign_cdap_rank(persons, person_type_map, trace_hh_id=None, trace_label=None):
     """
     Assign an integer index, cdap_rank, to each household member. (Starting with 1, not 0)
 
@@ -114,7 +105,7 @@ def assign_cdap_rank(persons, trace_hh_id=None, trace_label=None):
 
     # choose up to 2 workers, preferring full over part, older over younger
     workers = \
-        persons.loc[persons[_ptype_].isin(WORKER_PTYPES), [_hh_id_, _ptype_]]\
+        persons.loc[persons[_ptype_].isin(person_type_map['WORKER']), [_hh_id_, _ptype_]]\
         .sort_values(by=[_hh_id_, _ptype_], ascending=[True, True])\
         .groupby(_hh_id_).head(2)
     # tag the selected workers
@@ -123,7 +114,7 @@ def assign_cdap_rank(persons, trace_hh_id=None, trace_label=None):
 
     # choose up to 3, preferring youngest
     children = \
-        persons.loc[persons[_ptype_].isin(CHILD_PTYPES), [_hh_id_, _ptype_, _age_]]\
+        persons.loc[persons[_ptype_].isin(person_type_map['CHILD']), [_hh_id_, _ptype_, _age_]]\
         .sort_values(by=[_hh_id_, _ptype_], ascending=[True, True])\
         .groupby(_hh_id_).head(3)
     # tag the selected children
@@ -194,7 +185,7 @@ def individual_utilities(
     """
 
     # calculate single person utilities
-    indiv_utils = simulate.eval_utilities(cdap_indiv_spec, persons, locals_d, trace_label)
+    indiv_utils = simulate.eval_utilities(cdap_indiv_spec, persons, locals_d, trace_label=trace_label)
 
     # add columns from persons to facilitate building household interactions
     useful_columns = [_hh_id_, _ptype_, 'cdap_rank', _hh_size_]
@@ -261,7 +252,7 @@ def get_cached_spec(hhsize):
 
     spec = inject.get_injectable(spec_name, None)
     if spec is not None:
-        logger.info("build_cdap_spec returning cached injectable spec %s", spec_name)
+        logger.debug("build_cdap_spec returning cached injectable spec %s", spec_name)
         return spec
 
     # this is problematic for multiprocessing and since we delete csv files in output_dir
@@ -643,7 +634,7 @@ def household_activity_choices(indiv_utils, interaction_coefficients, hhsize,
         utils = simulate.eval_utilities(spec, choosers, trace_label=trace_label)
 
     if len(utils.index) == 0:
-        return pd.Series()
+        return pd.Series(dtype='float64')
 
     probs = logit.utils_to_probs(utils, trace_label=trace_label)
 
@@ -757,7 +748,7 @@ def extra_hh_member_choices(persons, cdap_fixed_relative_proportions, locals_d,
     choosers = persons[persons['cdap_rank'] > MAX_HHSIZE]
 
     if len(choosers.index) == 0:
-        return pd.Series()
+        return pd.Series(dtype='float64')
 
     # eval the expression file
     values = simulate.eval_variables(cdap_fixed_relative_proportions.index, choosers, locals_d)
@@ -800,6 +791,7 @@ def extra_hh_member_choices(persons, cdap_fixed_relative_proportions, locals_d,
 
 def _run_cdap(
         persons,
+        person_type_map,
         cdap_indiv_spec,
         interaction_coefficients,
         cdap_fixed_relative_proportions,
@@ -808,12 +800,20 @@ def _run_cdap(
     """
     Implements core run_cdap functionality on persons df (or chunked subset thereof)
     Aside from chunking of persons df, params are passed through from run_cdap unchanged
+
+    Returns pandas Dataframe with two columns:
+        cdap_activity : str
+            activity for that person expressed as 'M', 'N', 'H'
+        cdap_rank : int
+            activities for persons with cdap_rank <= MAX_HHSIZE are determined by cdap
+            'extra' household members activities are assigned by cdap_fixed_relative_proportions
     """
 
     # assign integer cdap_rank to each household member
     # persons with cdap_rank 1..MAX_HHSIZE will be have their activities chose by CDAP model
     # extra household members, will have activities assigned by in fixed proportions
-    assign_cdap_rank(persons, trace_hh_id, trace_label)
+    assign_cdap_rank(persons, person_type_map, trace_hh_id, trace_label)
+    chunk.log_df(trace_label, 'persons', persons)
 
     # Calculate CDAP utilities for each individual, ignoring interactions
     # ind_utils has index of 'person_id' and a column for each alternative
@@ -821,6 +821,7 @@ def _run_cdap(
     indiv_utils = individual_utilities(persons[persons.cdap_rank <= MAX_HHSIZE],
                                        cdap_indiv_spec, locals_d,
                                        trace_hh_id, trace_label)
+    chunk.log_df(trace_label, 'indiv_utils', indiv_utils)
 
     # compute interaction utilities, probabilities, and hh activity pattern choices
     # for each size household separately in turn up to MAX_HHSIZE
@@ -834,9 +835,11 @@ def _run_cdap(
         hh_choices_list.append(choices)
 
     del indiv_utils
+    chunk.log_df(trace_label, 'indiv_utils', None)
 
     # concat all the household choices into a single series indexed on _hh_index_
     hh_activity_choices = pd.concat(hh_choices_list)
+    chunk.log_df(trace_label, 'hh_activity_choices', hh_activity_choices)
 
     # unpack the household activity choice list into choices for each (non-extra) household member
     # resulting series contains one activity per individual hh member, indexed on _persons_index_
@@ -856,8 +859,7 @@ def _run_cdap(
     person_choices = pd.concat([cdap_person_choices, extra_person_choices])
 
     persons['cdap_activity'] = person_choices
-
-    cdap_results = persons[['cdap_rank', 'cdap_activity']]
+    chunk.log_df(trace_label, 'persons', persons)
 
     # if DUMP:
     #     tracing.trace_df(hh_activity_choices, '%s.DUMP.hh_activity_choices' % trace_label,
@@ -865,34 +867,17 @@ def _run_cdap(
     #     tracing.trace_df(cdap_results, '%s.DUMP.cdap_results' % trace_label,
     #                      transpose=False, slicer='NONE')
 
-    chunk.log_df(trace_label, 'persons', persons)
+    result = persons[['cdap_rank', 'cdap_activity']]
 
-    # return dataframe with two columns
-    return cdap_results
+    del persons
+    chunk.log_df(trace_label, 'persons', None)
 
-
-def calc_rows_per_chunk(chunk_size, choosers, trace_label=None):
-
-    # NOTE we chunk chunk_id
-    num_choosers = choosers['chunk_id'].max() + 1
-
-    # if not chunking, then return num_choosers
-    # if chunk_size == 0:
-    #     return num_choosers, 0
-
-    chooser_row_size = choosers.shape[1]
-
-    # scale row_size by average number of chooser rows per chunk_id
-    rows_per_chunk_id = choosers.shape[0] / float(num_choosers)
-    row_size = int(rows_per_chunk_id * chooser_row_size)
-
-    # logger.debug("%s #chunk_calc choosers %s" % (trace_label, choosers.shape))
-
-    return chunk.rows_per_chunk(chunk_size, row_size, num_choosers, trace_label)
+    return result
 
 
 def run_cdap(
         persons,
+        person_type_map,
         cdap_indiv_spec,
         cdap_interaction_coefficients,
         cdap_fixed_relative_proportions,
@@ -932,41 +917,40 @@ def run_cdap(
 
         cdap_activity : str
             activity for that person expressed as 'M', 'N', 'H'
-        cdap_rank : int
-            activities for persons with cdap_rank <= MAX_HHSIZE are determined by cdap
-            'extra' household members activities are assigned by cdap_fixed_relative_proportions
     """
 
     trace_label = tracing.extend_trace_label(trace_label, 'cdap')
 
-    rows_per_chunk, effective_chunk_size = \
-        calc_rows_per_chunk(chunk_size, persons, trace_label=trace_label)
-
     result_list = []
     # segment by person type and pick the right spec for each person type
-    for i, num_chunks, persons_chunk in chunk.chunked_choosers_by_chunk_id(persons, rows_per_chunk):
+    for i, persons_chunk, chunk_trace_label \
+            in chunk.adaptive_chunked_choosers_by_chunk_id(persons, chunk_size, trace_label):
 
-        logger.info("Running chunk %s of %s with %d persons" % (i, num_chunks, len(persons_chunk)))
+        cdap_results = \
+            _run_cdap(persons_chunk,
+                      person_type_map,
+                      cdap_indiv_spec,
+                      cdap_interaction_coefficients,
+                      cdap_fixed_relative_proportions,
+                      locals_d,
+                      trace_hh_id, chunk_trace_label)
 
-        chunk_trace_label = tracing.extend_trace_label(trace_label, 'chunk_%s' % i)
+        result_list.append(cdap_results)
 
-        chunk.log_open(chunk_trace_label, chunk_size, effective_chunk_size)
-
-        choices = _run_cdap(persons_chunk,
-                            cdap_indiv_spec,
-                            cdap_interaction_coefficients,
-                            cdap_fixed_relative_proportions,
-                            locals_d,
-                            trace_hh_id, chunk_trace_label)
-
-        chunk.log_close(chunk_trace_label)
-
-        result_list.append(choices)
+        chunk.log_df(trace_label, f'result_list', result_list)
 
     # FIXME: this will require 2X RAM
     # if necessary, could append to hdf5 store on disk:
     # http://pandas.pydata.org/pandas-docs/stable/io.html#id2
     if len(result_list) > 1:
-        choices = pd.concat(result_list)
+        cdap_results = pd.concat(result_list)
 
-    return choices
+    if trace_hh_id:
+
+        tracing.trace_df(cdap_results,
+                         label="cdap",
+                         columns=['cdap_rank', 'cdap_activity'],
+                         warn_if_empty=True)
+
+    # return choices column as series
+    return cdap_results['cdap_activity']

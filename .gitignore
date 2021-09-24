@@ -1,5 +1,4 @@
 sandbox/
-example/data/*
 .idea
 .ipynb_checkpoints
 .coverage*
@@ -64,4 +63,12 @@ docs/_build/
 # Python profiles
 *.cprof
 *.lprof
+
+# macOS
+*.DS_Store
+_test_est
+
+# activitysim conventions
+*_local/
+*_local.*
 

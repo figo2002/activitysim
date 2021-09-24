@@ -1,10 +1,5 @@
 # ActivitySim
 # See full license in LICENSE.txt.
-
-from __future__ import (absolute_import, division, print_function, )
-from future.standard_library import install_aliases
-install_aliases()  # noqa: E402
-
 import logging
 
 import pandas as pd
@@ -25,7 +20,7 @@ def households_sample_size(settings, override_hh_ids):
     if override_hh_ids is None:
         return settings.get('households_sample_size', 0)
     else:
-        return len(override_hh_ids)
+        return 0 if override_hh_ids is None else len(override_hh_ids)
 
 
 @inject.injectable(cache=True)
@@ -84,7 +79,9 @@ def trace_od(settings):
 
 @inject.injectable(cache=True)
 def chunk_size(settings):
-    return int(settings.get('chunk_size', 0))
+    _chunk_size = int(settings.get('chunk_size', 0) or 0)
+
+    return _chunk_size
 
 
 @inject.injectable(cache=True)

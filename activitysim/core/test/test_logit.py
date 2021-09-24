@@ -6,12 +6,22 @@ import os.path
 import numpy as np
 import pandas as pd
 
-import pandas.util.testing as pdt
+import pandas.testing as pdt
 import pytest
 
 from ..simulate import eval_variables
 from .. import logit
 from .. import inject
+
+
+def setup_function():
+    configs_dir = os.path.join(os.path.dirname(__file__), 'configs')
+    inject.add_injectable("configs_dir", configs_dir)
+
+
+def teardown_function(func):
+    inject.clear_cache()
+    inject.reinject_decorated_tables()
 
 
 @pytest.fixture(scope='module')

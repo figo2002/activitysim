@@ -1,14 +1,11 @@
 # ActivitySim
 # See full license in LICENSE.txt.
-
-from __future__ import (absolute_import, division, print_function, )
-from future.standard_library import install_aliases
-install_aliases()  # noqa: E402
-
 import logging
 
+import pandas as pd
+
 from activitysim.core import inject
-from .input_store import read_input_table
+from activitysim.core.input import read_input_table
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +13,15 @@ logger = logging.getLogger(__name__)
 @inject.table()
 def land_use():
 
-    df = read_input_table("land_use_taz")
+    df = read_input_table("land_use")
+
+    # try to make life easy for everybody by keeping everything in canonical order
+    # but as long as coalesce_pipeline doesn't sort tables it coalesces, it might not stay in order
+    # so even though we do this, anyone downstream who depends on it, should look out for themselves...
+    if not df.index.is_monotonic_increasing:
+        df = df.sort_index()
 
     logger.info("loaded land_use %s" % (df.shape,))
-
-    df.index.name = 'TAZ'
 
     # replace table function with dataframe
     inject.add_table('land_use', df)
@@ -28,4 +29,4 @@ def land_use():
     return df
 
 
-inject.broadcast('land_use', 'households', cast_index=True, onto_on='TAZ')
+inject.broadcast('land_use', 'households', cast_index=True, onto_on='home_zone_id')

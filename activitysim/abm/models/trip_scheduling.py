@@ -1,9 +1,5 @@
 # ActivitySim
 # See full license in LICENSE.txt.
-
-from __future__ import (absolute_import, division, print_function, )
-from future.standard_library import install_aliases
-install_aliases()  # noqa: E402
 from builtins import range
 
 import logging
@@ -18,12 +14,12 @@ from activitysim.core import tracing
 from activitysim.core import chunk
 from activitysim.core import pipeline
 
-from activitysim.core.util import assign_in_place
-from .util import expressions
 from activitysim.core.util import reindex
 
 from activitysim.abm.models.util.trip import failed_trip_cohorts
 from activitysim.abm.models.util.trip import cleanup_failed_trips
+
+from activitysim.abm.models.util import estimation
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +41,8 @@ FAILFIX = 'FAILFIX'
 FAILFIX_CHOOSE_MOST_INITIAL = 'choose_most_initial'
 FAILFIX_DROP_AND_CLEANUP = 'drop_and_cleanup'
 FAILFIX_DEFAULT = FAILFIX_CHOOSE_MOST_INITIAL
+
+PROBS_JOIN_COLUMNS = ['primary_purpose', 'outbound', 'tour_hour', 'trip_num']
 
 
 def set_tour_hour(trips, tours):
@@ -74,7 +72,10 @@ def set_tour_hour(trips, tours):
     # subtours indexed by parent_tour_id
     subtours = tours.loc[tours.primary_purpose == 'atwork',
                          ['tour_num', 'tour_count', 'parent_tour_id', 'start', 'end']]
-    subtours = subtours.astype(int).set_index('parent_tour_id')
+
+    subtours.parent_tour_id = subtours.parent_tour_id.astype(np.int64)
+    subtours = subtours.set_index('parent_tour_id')
+    subtours = subtours.astype(np.int16)  # remaining columns are all small ints
 
     # bool series
     trip_has_subtours = trips.tour_id.isin(subtours.index)
@@ -205,11 +206,10 @@ def schedule_nth_trips(
 
     depart_alt_base = model_settings.get('DEPART_ALT_BASE')
 
-    probs_join_cols = ['primary_purpose', 'outbound', 'tour_hour', 'trip_num']
-    probs_cols = [c for c in probs_spec.columns if c not in probs_join_cols]
+    probs_cols = [c for c in probs_spec.columns if c not in PROBS_JOIN_COLUMNS]
 
     # left join trips to probs (there may be multiple rows per trip for multiple depart ranges)
-    choosers = pd.merge(trips.reset_index(), probs_spec, on=probs_join_cols,
+    choosers = pd.merge(trips.reset_index(), probs_spec, on=PROBS_JOIN_COLUMNS,
                         how='left').set_index('trip_id')
     chunk.log_df(trace_label, "choosers", choosers)
 
@@ -222,7 +222,6 @@ def schedule_nth_trips(
 
     # zero out probs outside earliest-latest window
     chooser_probs = clip_probs(trips, choosers[probs_cols], model_settings)
-
     chunk.log_df(trace_label, "chooser_probs", chooser_probs)
 
     if first_trip_in_leg:
@@ -231,13 +230,12 @@ def schedule_nth_trips(
 
     # probs should sum to 1 with residual probs resulting in choice of 'fail'
     chooser_probs['fail'] = 1 - chooser_probs.sum(axis=1).clip(0, 1)
+    chunk.log_df(trace_label, "chooser_probs", chooser_probs)
 
     if trace_hh_id and tracing.has_trace_targets(trips):
         tracing.trace_df(chooser_probs, '%s.chooser_probs' % trace_label)
 
-    choices, rands = logit.make_choices(
-        chooser_probs,
-        trace_label=trace_label, trace_choosers=choosers)
+    choices, rands = logit.make_choices(chooser_probs, trace_label=trace_label, trace_choosers=choosers)
 
     chunk.log_df(trace_label, "choices", choices)
     chunk.log_df(trace_label, "rands", rands)
@@ -281,7 +279,7 @@ def schedule_trips_in_leg(
         trips,
         probs_spec,
         model_settings,
-        last_iteration,
+        is_last_iteration,
         trace_hh_id, trace_label):
     """
 
@@ -291,7 +289,7 @@ def schedule_trips_in_leg(
     trips
     probs_spec
     depart_alt_base
-    last_iteration
+    is_last_iteration
     trace_hh_id
     trace_label
 
@@ -304,6 +302,8 @@ def schedule_trips_in_leg(
     failfix = model_settings.get(FAILFIX, FAILFIX_DEFAULT)
 
     # logger.debug("%s scheduling %s trips" % (trace_label, trips.shape[0]))
+
+    assert len(trips) > 0
 
     assert (trips.outbound == outbound).all()
 
@@ -323,7 +323,7 @@ def schedule_trips_in_leg(
     trips = trips.sort_index()
     trips['next_trip_id'] = np.roll(trips.index, -1 if outbound else 1)
     is_final = (trips.trip_num == trips.trip_count) if outbound else (trips.trip_num == 1)
-    trips.next_trip_id = trips.next_trip_id.where(is_final, NO_TRIP_ID)
+    trips.next_trip_id = trips.next_trip_id.where(~is_final, NO_TRIP_ID)
 
     # iterate over outbound trips in ascending trip_num order, skipping the initial trip
     # iterate over inbound trips in descending trip_num order, skipping the finial trip
@@ -337,25 +337,21 @@ def schedule_trips_in_leg(
 
         nth_trace_label = tracing.extend_trace_label(trace_label, 'num_%s' % i)
 
-        chunk.log_open(nth_trace_label, chunk_size=0, effective_chunk_size=0)
-
         choices = schedule_nth_trips(
             nth_trips,
             probs_spec,
             model_settings,
             first_trip_in_leg=first_trip_in_leg,
-            report_failed_trips=last_iteration,
+            report_failed_trips=is_last_iteration,
             trace_hh_id=trace_hh_id,
             trace_label=nth_trace_label)
-
-        chunk.log_close(nth_trace_label)
 
         # if outbound, this trip's depart constrains next trip's earliest depart option
         # if inbound, we are handling in reverse order, so it constrains latest depart instead
         ADJUST_NEXT_DEPART_COL = 'earliest' if outbound else 'latest'
 
         # most initial departure (when no choice was made because all probs were zero)
-        if last_iteration and (failfix == FAILFIX_CHOOSE_MOST_INITIAL):
+        if is_last_iteration and (failfix == FAILFIX_CHOOSE_MOST_INITIAL):
             choices = choices.reindex(nth_trips.index)
             logger.warning("%s coercing %s depart choices to most initial" %
                            (nth_trace_label, choices.isna().sum()))
@@ -371,6 +367,8 @@ def schedule_trips_in_leg(
 
         result_list.append(choices)
 
+        chunk.log_df(trace_label, f'result_list', result_list)
+
         first_trip_in_leg = False
 
     if len(result_list) > 1:
@@ -379,86 +377,56 @@ def schedule_trips_in_leg(
     return choices
 
 
-def trip_scheduling_rpc(chunk_size, choosers, spec, trace_label):
-
-    # NOTE we chunk chunk_id
-    num_choosers = choosers['chunk_id'].max() + 1
-
-    # if not chunking, then return num_choosers
-    # if chunk_size == 0:
-    #     return num_choosers, 0
-
-    # extra columns from spec
-    extra_columns = spec.shape[1]
-
-    chooser_row_size = choosers.shape[1] + extra_columns
-
-    # scale row_size by average number of chooser rows per chunk_id
-    rows_per_chunk_id = choosers.shape[0] / num_choosers
-    row_size = (rows_per_chunk_id * chooser_row_size)
-
-    # print "num_choosers", num_choosers
-    # print "choosers.shape", choosers.shape
-    # print "rows_per_chunk_id", rows_per_chunk_id
-    # print "chooser_row_size", chooser_row_size
-    # print "(rows_per_chunk_id * chooser_row_size)", (rows_per_chunk_id * chooser_row_size)
-    # print "row_size", row_size
-    # #bug
-
-    return chunk.rows_per_chunk(chunk_size, row_size, num_choosers, trace_label)
-
-
 def run_trip_scheduling(
-        trips,
+        trips_chunk,
         tours,
         probs_spec,
         model_settings,
-        last_iteration,
+        estimator,
+        is_last_iteration,
         chunk_size,
+        chunk_tag,
         trace_hh_id,
         trace_label):
 
-    set_tour_hour(trips, tours)
-
-    rows_per_chunk, effective_chunk_size = \
-        trip_scheduling_rpc(chunk_size, trips, probs_spec, trace_label)
+    # only non-initial trips require scheduling, segment handing first such trip in tour will use most space
+    # is_outbound_chooser = (trips.trip_num > 1) & trips.outbound & (trips.primary_purpose != 'atwork')
+    # is_inbound_chooser = (trips.trip_num < trips.trip_count) & ~trips.outbound & (trips.primary_purpose != 'atwork')
+    # num_choosers = (is_inbound_chooser | is_outbound_chooser).sum()
 
     result_list = []
-    for i, num_chunks, trips_chunk in chunk.chunked_choosers_by_chunk_id(trips, rows_per_chunk):
 
-        if num_chunks > 1:
-            chunk_trace_label = tracing.extend_trace_label(trace_label, 'chunk_%s' % i)
-            logger.info("%s of %s size %d" % (chunk_trace_label, num_chunks, len(trips_chunk)))
-        else:
-            chunk_trace_label = trace_label
-
-        leg_trace_label = tracing.extend_trace_label(chunk_trace_label, 'outbound')
-        chunk.log_open(leg_trace_label, chunk_size, effective_chunk_size)
+    if trips_chunk.outbound.any():
+        leg_chunk = trips_chunk[trips_chunk.outbound]
+        leg_trace_label = tracing.extend_trace_label(trace_label, 'outbound')
         choices = \
             schedule_trips_in_leg(
                 outbound=True,
-                trips=trips_chunk[trips_chunk.outbound],
+                trips=leg_chunk,
                 probs_spec=probs_spec,
                 model_settings=model_settings,
-                last_iteration=last_iteration,
+                is_last_iteration=is_last_iteration,
                 trace_hh_id=trace_hh_id,
                 trace_label=leg_trace_label)
         result_list.append(choices)
-        chunk.log_close(leg_trace_label)
 
-        leg_trace_label = tracing.extend_trace_label(chunk_trace_label, 'inbound')
-        chunk.log_open(leg_trace_label, chunk_size, effective_chunk_size)
+        chunk.log_df(trace_label, f'result_list', result_list)
+
+    if (~trips_chunk.outbound).any():
+        leg_chunk = trips_chunk[~trips_chunk.outbound]
+        leg_trace_label = tracing.extend_trace_label(trace_label, 'inbound')
         choices = \
             schedule_trips_in_leg(
                 outbound=False,
-                trips=trips_chunk[~trips_chunk.outbound],
+                trips=leg_chunk,
                 probs_spec=probs_spec,
                 model_settings=model_settings,
-                last_iteration=last_iteration,
+                is_last_iteration=is_last_iteration,
                 trace_hh_id=trace_hh_id,
                 trace_label=leg_trace_label)
         result_list.append(choices)
-        chunk.log_close(leg_trace_label)
+
+        chunk.log_df(trace_label, f'result_list', result_list)
 
     choices = pd.concat(result_list)
 
@@ -501,10 +469,10 @@ def trip_scheduling(
     a tour is very short (e.g. one time period) and the prob spec having a zero probability for
     that tour hour.
 
-    Therefor we need to handle trips that could not be scheduled. There are two ways (at least)
+    Therefore we need to handle trips that could not be scheduled. There are two ways (at least)
     to solve this problem:
 
-    1) CHOOSE_MOST_INITIAL
+    1) choose_most_initial
     simply assign a depart time to the trip, even if it has a zero probability. It makes
     most sense, in this case, to assign the 'most initial' depart time, so that subsequent trips
     are minimally impacted. This can be done in the final iteration, thus affecting only the
@@ -514,66 +482,100 @@ def trip_scheduling(
     drop trips that could no be scheduled, and adjust their leg mates, as is done for failed
     trips in trip_destination.
 
-    For now we are choosing among these approaches with a manifest constant, but this could
-    be made a model setting...
+    Which option is applied is determined by the FAILFIX model setting
 
     """
     trace_label = "trip_scheduling"
-
-    model_settings = config.read_model_settings('trip_scheduling.yaml')
-    assert 'DEPART_ALT_BASE' in model_settings
-
-    failfix = model_settings.get(FAILFIX, FAILFIX_DEFAULT)
-
-    probs_spec = pd.read_csv(config.config_file_path('trip_scheduling_probs.csv'), comment='#')
+    model_settings_file_name = 'trip_scheduling.yaml'
+    model_settings = config.read_model_settings(model_settings_file_name)
 
     trips_df = trips.to_frame()
     tours = tours.to_frame()
 
+    # add columns 'tour_hour', 'earliest', 'latest' to trips
+    set_tour_hour(trips_df, tours)
+
+    # trip_scheduling is a probabilistic model ane we don't support estimation,
+    # but we do need to override choices in estimation mode
+    estimator = estimation.manager.begin_estimation('trip_scheduling')
+    if estimator:
+        estimator.write_spec(model_settings, tag='PROBS_SPEC')
+        estimator.write_model_settings(model_settings, model_settings_file_name)
+        chooser_cols_for_estimation = ['person_id',  'household_id',  'tour_id',  'trip_num', 'trip_count',
+                                       'primary_purpose', 'outbound', 'earliest', 'latest', 'tour_hour', ]
+        estimator.write_choosers(trips_df[chooser_cols_for_estimation])
+
+    probs_spec = pd.read_csv(config.config_file_path('trip_scheduling_probs.csv'), comment='#')
+    # FIXME for now, not really doing estimation for probabilistic model - just overwriting choices
+    # besides, it isn't clear that named coefficients would be helpful if we had some form of estimation
+    # coefficients_df = simulate.read_model_coefficients(model_settings)
+    # probs_spec = map_coefficients(probs_spec, coefficients_df)
+
     # add tour-based chunk_id so we can chunk all trips in tour together
-    trips_df['chunk_id'] = \
-        reindex(pd.Series(list(range(tours.shape[0])), tours.index), trips_df.tour_id)
+    trips_df['chunk_id'] = reindex(pd.Series(list(range(len(tours))), tours.index), trips_df.tour_id)
+
+    assert 'DEPART_ALT_BASE' in model_settings
+    failfix = model_settings.get(FAILFIX, FAILFIX_DEFAULT)
 
     max_iterations = model_settings.get('MAX_ITERATIONS', 1)
     assert max_iterations > 0
 
     choices_list = []
-    i = 0
-    while (i < max_iterations) and not trips_df.empty:
 
-        i += 1
-        last_iteration = (i == max_iterations)
+    for chunk_i, trips_chunk, chunk_trace_label in chunk.adaptive_chunked_choosers_by_chunk_id(trips_df,
+                                                                                               chunk_size,
+                                                                                               trace_label,
+                                                                                               trace_label):
 
-        trace_label_i = tracing.extend_trace_label(trace_label, "i%s" % i)
-        logger.info("%s scheduling %s trips", trace_label_i, trips_df.shape[0])
+        i = 0
+        while (i < max_iterations) and not trips_chunk.empty:
 
-        choices = \
-            run_trip_scheduling(
-                trips_df,
-                tours,
-                probs_spec,
-                model_settings,
-                last_iteration=last_iteration,
-                trace_hh_id=trace_hh_id,
-                chunk_size=chunk_size,
-                trace_label=trace_label_i)
+            # only chunk log first iteration since memory use declines with each iteration
+            with chunk.chunk_log(trace_label) if i == 0 else chunk.chunk_log_skip():
 
-        # boolean series of trips whose individual trip scheduling failed
-        failed = choices.reindex(trips_df.index).isnull()
-        logger.info("%s %s failed", trace_label_i, failed.sum())
+                i += 1
+                is_last_iteration = (i == max_iterations)
 
-        if not last_iteration:
-            # boolean series of trips whose leg scheduling failed
-            failed_cohorts = failed_trip_cohorts(trips_df, failed)
-            trips_df = trips_df[failed_cohorts]
-            choices = choices[~failed_cohorts]
+                trace_label_i = tracing.extend_trace_label(trace_label, "i%s" % i)
+                logger.info("%s scheduling %s trips within chunk %s", trace_label_i, trips_chunk.shape[0], chunk_i)
 
-        choices_list.append(choices)
+                choices = \
+                    run_trip_scheduling(
+                        trips_chunk,
+                        tours,
+                        probs_spec,
+                        model_settings,
+                        estimator=estimator,
+                        is_last_iteration=is_last_iteration,
+                        trace_hh_id=trace_hh_id,
+                        chunk_size=chunk_size,
+                        chunk_tag=trace_label,
+                        trace_label=trace_label_i)
+
+                # boolean series of trips whose individual trip scheduling failed
+                failed = choices.reindex(trips_chunk.index).isnull()
+                logger.info("%s %s failed", trace_label_i, failed.sum())
+
+                if not is_last_iteration:
+                    # boolean series of trips whose leg scheduling failed
+                    failed_cohorts = failed_trip_cohorts(trips_chunk, failed)
+                    trips_chunk = trips_chunk[failed_cohorts]
+                    choices = choices[~failed_cohorts]
+
+                choices_list.append(choices)
 
     trips_df = trips.to_frame()
 
     choices = pd.concat(choices_list)
     choices = choices.reindex(trips_df.index)
+
+    if estimator:
+        estimator.write_choices(choices)
+        choices = estimator.get_survey_values(choices, 'trips', 'depart')  # override choices
+        estimator.write_override_choices(choices)
+        estimator.end_estimation()
+        assert not choices.isnull().any()
+
     if choices.isnull().any():
         logger.warning("%s of %s trips could not be scheduled after %s iterations" %
                        (choices.isnull().sum(), trips_df.shape[0], i))

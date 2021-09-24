@@ -2,67 +2,67 @@
 How the System Works
 ====================
 
-This page describes how the software works, how multiprocessing works, and the example model data schema.
+This page describes how the software works, how multiprocessing works, and the primary example model data schema.  The code snippets below may not exactly match the latest version of the software, but they are close enough to illustrate how the system works.  
 
 .. _how_the_system_works:
 
 Execution Flow
 --------------
 
-The example model run starts by running ``simulation.py``.
+The example model run starts by running the steps in :ref:`example_run`.
 
 Initialization
 ~~~~~~~~~~~~~~
 
-The first significant step of ``simulation.py`` is:
+The first significant step of the ``run`` command is:
 
 ::
 
-  from activitysim import abm 
-  
+  from activitysim import abm
+
 which loads :mod:`activitysim.abm.__init__`, which calls:
 
 ::
 
-   import misc 
+   import misc
    import tables
    import models
 
 which then loads the misc, tables, and models class definitions.  Loading :mod:`activitysim.abm.misc` calls:
 
-:: 
+::
 
    from activitysim.core import config
    from activitysim.core import inject
 
-which loads the config and inject classes.  These define `ORCA <https://github.com/udst/orca>`__ inspired injectables (functions) and 
-helper functions for running models.  For example, the Python decorator ``@inject.injectable`` overrides the function definition ``settings`` to 
-execute this function whenever the ``settings`` object is called by the system.  The :mod:`activitysim.core.inject` manages the data 
-pipeline.  The inject class does everything ORCA did in previous versions of ActivitySim and so ORCA is no longer a dependency.
+which loads the config and inject classes.  These define Inject injectables (functions) and
+helper functions for running models.  For example, the Python decorator ``@inject.injectable`` overrides the function definition ``settings`` to
+execute this function whenever the ``settings`` object is called by the system.  The :mod:`activitysim.core.inject` manages the data
+pipeline.
 
-:: 
+::
 
    @inject.injectable(cache=True)
    def settings():
        settings_dict = read_settings_file('settings.yaml', mandatory=True)
        return settings_dict
 
-Next, the tables module executes the following import statements in :mod:`activitysim.abm.tables.__init__` to 
-define the dynamic inject tables (households, persons, skims, etc.), but does not load them. It also defines the 
-core dynamic injectables (functions) defined in the classes. The Python decorator ``@inject.table`` override the function 
-definitions so the name of the function becomes the name of the table when dynamically called by the system. 
+Next, the tables module executes the following import statements in :mod:`activitysim.abm.tables.__init__` to
+define the dynamic inject tables (households, persons, skims, etc.), but does not load them. It also defines the
+core dynamic injectables (functions) defined in the classes. The Python decorator ``@inject.table`` override the function
+definitions so the name of the function becomes the name of the table when dynamically called by the system.
 
 ::
 
   from . import households
   from . import persons
   #etc...
-  
+
   #then in households.py
   @inject.table()
   def households(households_sample_size, override_hh_ids, trace_hh_id):
-  
-The models module then loads all the sub-models, which are registered as model steps with 
+
+The models module then loads all the sub-models, which are registered as model steps with
 the ``@inject.step()`` decorator.  These steps will eventually be run by the data pipeliner.
 
 ::
@@ -71,24 +71,23 @@ the ``@inject.step()`` decorator.  These steps will eventually be run by the dat
   from . import atwork_subtour_destination
   from . import atwork_subtour_frequency
   #etc...
-  
+
   #then in accessibility.py
   @inject.step()
-  def compute_accessibility(accessibility, skim_dict, land_use, trace_od):
+  def compute_accessibility(accessibility, network_los, land_use, trace_od):
 
-Back in the main ``simulation.py`` script, the next steps are to load the tracing, configuration, setting, and pipeline classe
-to get the system management components up and running.  
+Back in the main ``run`` command, the next steps are to load the tracing, configuration, setting, and pipeline classes
+to get the system management components up and running.
 
 ::
 
   from activitysim.core import tracing
   from activitysim.core import config
-  from activitysim.core.config import setting
   from activitysim.core import pipeline
 
 
-The next step in the example is to define the ``run`` method, call it if the script is being run as the program entry point, and handle the 
-arguments passed in via the command line.  
+The next step in the example is to define the ``run`` method, call it if the script is being run as the program entry point, and handle the
+arguments passed in via the command line.
 
 ::
 
@@ -100,22 +99,22 @@ arguments passed in via the command line.
 
 
 .. note::
-   For more information on run options, type ``python simulation.py -h`` on the command line
+   For more information on run options, type ``activitysim run -h`` on the command line
 
 
 The first key thing that happens in the ``run`` function is ``resume_after = setting('resume_after', None)``, which causes the system
-to go looking for ``setting``.  Earlier we saw that ``setting`` was defined as an injectable and so the system gets this object if it 
-is already in memory, or if not, calls this function which loads the ``config/settings.yaml`` file.  This is called lazy loading or 
+to go looking for ``setting``.  Earlier we saw that ``setting`` was defined as an injectable and so the system gets this object if it
+is already in memory, or if not, calls this function which loads the ``config/settings.yaml`` file.  This is called lazy loading or
 on-demand loading. Next, the system loads the models list and starts the pipeline:
 
 ::
-  
+
   pipeline.run(models=setting('models'), resume_after=resume_after)
 
-The :func:`activitysim.core.pipeline.run` method loops through the list of models, calls ``inject.run([step_name])``, 
-and manages the data pipeline.  The first disaggregate data processing step (or model) run is ``initialize_households``, defined in 
-:mod:`activitysim.abm.models.initialize`.  The ``initialize_households`` step is responsible for requesting reading of the raw 
-households and persons into memory. 
+The :func:`activitysim.core.pipeline.run` method loops through the list of models, calls ``inject.run([step_name])``,
+and manages the data pipeline.  The first disaggregate data processing step (or model) run is ``initialize_households``, defined in
+:mod:`activitysim.abm.models.initialize`.  The ``initialize_households`` step is responsible for requesting reading of the raw
+households and persons into memory.
 
 Initialize Households
 ~~~~~~~~~~~~~~~~~~~~~
@@ -123,21 +122,21 @@ Initialize Households
 The initialize households step/model is run via:
 
 ::
-  
+
    @inject.step()
    def initialize_households():
 
       trace_label = 'initialize_households'
       model_settings = config.read_model_settings('initialize_households.yaml', mandatory=True)
       annotate_tables(model_settings, trace_label)
-                             
+
 This step reads the ``initialize_households.yaml`` config file, which defines the :ref:`table_annotation` below.  Each table
 annotation applies the expressions specified in the annotate spec to the relevant table.  For example, the ``persons`` table
-is annotated with the results of the expressions in ``annotate_persons.csv``.  If the table is not already in memory, then 
-inject goes looking for it as explained below.  
+is annotated with the results of the expressions in ``annotate_persons.csv``.  If the table is not already in memory, then
+inject goes looking for it as explained below.
 
 ::
-  
+
    #initialize_households.yaml
    annotate_tables:
      - tablename: persons
@@ -186,10 +185,10 @@ inject goes looking for it as explained below.
         pipeline.replace_table(tablename, df)
 
 
-Remember that the ``persons`` table was previously registred as an injectable table when the persons table class was
-imported.  Now that the ``persons`` table is needed, inject calls this function, which requires the ``households`` and 
+Remember that the ``persons`` table was previously registered as an injectable table when the persons table class was
+imported.  Now that the ``persons`` table is needed, inject calls this function, which requires the ``households`` and
 ``trace_hh_id`` objects as well.  Since ``households`` has yet to be loaded, the system run the households inject table operation
-as well.  The various calls also setup logging, tracing, stable random number management, etc. 
+as well.  The various calls also setup logging, tracing, stable random number management, etc.
 
 ::
 
@@ -213,35 +212,37 @@ as well.  The various calls also setup logging, tracing, stable random number ma
         tracing.trace_df(df, "raw.persons", warn_if_empty=True)
 
     return df
-  
+
   #households requires households_sample_size, override_hh_ids, trace_hh_id
   @inject.table()
   def households(households_sample_size, override_hh_ids, trace_hh_id):
 
     df_full = read_input_table("households")
-  
 
-The process continues until all the dependencies are resolved.  It is the ``read_input_table`` function that 
-actually reads the input tables from the input HDF5 file.
+
+The process continues until all the dependencies are resolved.  It is the ``read_input_table`` function that
+actually reads the input tables from the input HDF5 or CSV file using the ``input_table_list`` found in ``settings.yaml``
 
 ::
 
-  #def read_input_table(table_name):
-  #...
-  
-  df = pd.read_hdf(input_store_path, table_name).
+  input_table_list:
+    - tablename: households
+      filename: households.csv
+      index_col: household_id
+      column_map:
+        HHID: household_id
 
 School Location
 ~~~~~~~~~~~~~~~
 
-Now that the persons, households, and other data are in memory, and also annotated with additional fields 
+Now that the persons, households, and other data are in memory, and also annotated with additional fields
 for later calculations, the school location model can be run.  The school location model is defined
 in :mod:`activitysim.abm.models.location_choice`.  As shown below, the school location model
 actually uses the ``persons_merged`` table, which includes joined household, land use, and accessibility
-tables as well.  The school location model also requires the skims dictionary object, which is discussed next.  
-Before running the generic iterate location choice function, the model reads the model settings file, which 
-defines various settings, including the expression files, sample size, mode choice logsum 
-calulcation settings, time periods for skim lookups, shadow pricing settings, etc.  
+tables as well.  The school location model also requires the network_los object, which is discussed next.
+Before running the generic iterate location choice function, the model reads the model settings file, which
+defines various settings, including the expression files, sample size, mode choice logsum
+calculation settings, time periods for skim lookups, shadow pricing settings, etc.
 
 ::
 
@@ -255,8 +256,7 @@ calulcation settings, time periods for skim lookups, shadow pricing settings, et
    @inject.step()
    def school_location(
         persons_merged, persons, households,
-        skim_dict, skim_stack,
-        chunk_size, trace_hh_id, locutor
+        network_los, chunk_size, trace_hh_id, locutor
         ):
 
      trace_label = 'school_location'
@@ -265,34 +265,35 @@ calulcation settings, time periods for skim lookups, shadow pricing settings, et
      iterate_location_choice(
         model_settings,
         persons_merged, persons, households,
-        skim_dict, skim_stack,
+        network_los,
         chunk_size, trace_hh_id, locutor, trace_label
 
-    
-Deep inside the method calls, the skim matrix lookups required for this model are configured. The following code 
-sets the keys for looking up the skim values for this model. In this case there is a ``TAZ`` column 
-in the households table that is renamed to `TAZ_chooser`` and a ``TAZ`` in the alternatives generation code.  
+
+Deep inside the method calls, the skim matrix lookups required for this model are configured via ``network_los``. The following
+code sets the keys for looking up the skim values for this model. In this case there is a ``TAZ`` column
+in the households table that is renamed to `TAZ_chooser`` and a ``TAZ`` in the alternatives generation code.
 The skims are lazy loaded under the name "skims" and are available in the expressions using the ``@skims`` expression.
 
 ::
 
-    # create wrapper with keys for this lookup - in this case there is a TAZ in the choosers
-    # and a TAZ in the alternatives which get merged during interaction
+    # create wrapper with keys for this lookup - in this case there is a home_zone_id in the choosers
+    # and a zone_id in the alternatives which get merged during interaction
     # (logit.interaction_dataset suffixes duplicate chooser column with '_chooser')
     # the skims will be available under the name "skims" for any @ expressions
-    skims = skim_dict.wrap('TAZ_chooser', 'TAZ')
+    skim_dict = network_los.get_default_skim_dict()
+    skims = skim_dict.wrap('home_zone_id', 'zone_id')
 
     locals_d = {
-        'skims': skims
+        'skims': skims,
     }
 
-The next step is to call the :func:`activitysim.core.interaction_sample.interaction_sample` function which 
-selects a sample of alternatives by running a MNL choice model simulation in which alternatives must be 
-merged with choosers because there are interaction terms.  The choosers table, the alternatives table, the 
-sample size, the model specification expressions file, the skims, the skims lookups, the chunk size, and the 
-trace labels are passed in.  
+The next step is to call the :func:`activitysim.core.interaction_sample.interaction_sample` function which
+selects a sample of alternatives by running a MNL choice model simulation in which alternatives must be
+merged with choosers because there are interaction terms.  The choosers table, the alternatives table, the
+sample size, the model specification expressions file, the skims, the skims lookups, the chunk size, and the
+trace labels are passed in.
 
-:: 
+::
 
     #interaction_sample
     choices = interaction_sample(
@@ -305,24 +306,24 @@ trace labels are passed in.
        locals_d=locals_d,
        chunk_size=chunk_size,
        trace_label=trace_label)
-    
-This function solves the utilities, calculates probabilities, draws random numbers, selects choices with 
-replacement, and returns the choices. This is done in a for loop of chunks of chooser records in order to avoid 
-running out of RAM when building the often large data tables. This method does a lot, and eventually 
-calls :func:`activitysim.core.interaction_simulate.eval_interaction_utilities`, which loops through each 
-expression in  the expression file and solves it at once for all records in the chunked chooser 
+
+This function solves the utilities, calculates probabilities, draws random numbers, selects choices with
+replacement, and returns the choices. This is done in a for loop of chunks of chooser records in order to avoid
+running out of RAM when building the often large data tables. This method does a lot, and eventually
+calls :func:`activitysim.core.interaction_simulate.eval_interaction_utilities`, which loops through each
+expression in  the expression file and solves it at once for all records in the chunked chooser
 table using Python's ``eval``.
 
-The :func:`activitysim.core.interaction_sample.interaction_sample` method is currently only a multinomial 
-logit choice model.  The :func:`activitysim.core.simulate.simple_simulate` method supports both MNL and NL as specified by 
-the ``LOGIT_TYPE`` setting in the model settings YAML file.   The ``auto_ownership.yaml`` file for example specifies 
+The :func:`activitysim.core.interaction_sample.interaction_sample` method is currently only a multinomial
+logit choice model.  The :func:`activitysim.core.simulate.simple_simulate` method supports both MNL and NL as specified by
+the ``LOGIT_TYPE`` setting in the model settings YAML file.   The ``auto_ownership.yaml`` file for example specifies
 the ``LOGIT_TYPE`` as ``MNL.``
 
-If the expression is a skim matrix, then the entire column of chooser OD pairs is retrieved from the matrix (i.e. numpy array) 
-in one vectorized step.  The ``orig`` and ``dest`` objects in ``self.data[orig, dest]`` in :mod:`activitysim.core.skim` are vectors
+If the expression is a skim matrix, then the entire column of chooser OD pairs is retrieved from the matrix (i.e. numpy array)
+in one vectorized step.  The ``orig`` and ``dest`` objects in ``self.data[orig, dest]`` in :mod:`activitysim.core.los` are vectors
 and selecting numpy array items with vector indexes returns a vector.  Trace data is also written out if configured (not shown below).
 
-:: 
+::
 
     # evaluate expressions from the spec multiply by coefficients and sum
     interaction_utilities, trace_eval_results \
@@ -359,25 +360,25 @@ and selecting numpy array items with vector indexes returns a vector.  Trace dat
 
     return choices_df
 
-The model creates the ``location_sample_df`` table using the choices above.  This table is 
+The model creates the ``location_sample_df`` table using the choices above.  This table is
 then used for the next model step - solving the logsums for the sample.
 
-:: 
+::
 
      # - location_logsums
      location_sample_df = run_location_logsums(
                 segment_name,
                 choosers,
-                skim_dict, skim_stack,
+                network_los,
                 location_sample_df,
                 model_settings,
                 chunk_size,
                 trace_hh_id,
                 tracing.extend_trace_label(trace_label, 'logsums.%s' % segment_name))
 
-The next steps are similar to what the sampling model does, except this time the sampled locations 
-table is the choosers and the model is calculating and adding the tour mode choice logsums using the 
-logsums settings and expression files.  The resulting logsums are added to the chooser table as the 
+The next steps are similar to what the sampling model does, except this time the sampled locations
+table is the choosers and the model is calculating and adding the tour mode choice logsums using the
+logsums settings and expression files.  The resulting logsums are added to the chooser table as the
 ``mode_choice_logsum`` column.
 
 ::
@@ -387,23 +388,23 @@ logsums settings and expression files.  The resulting logsums are added to the c
        choosers,
        tour_purpose,
        logsum_settings, model_settings,
-       skim_dict, skim_stack,
-       chunk_size, trace_hh_id,
+       network_los,
+       chunk_size,
        trace_label)
 
     location_sample_df['mode_choice_logsum'] = logsums
 
 The :func:`activitysim.abm.models.util.logsums.compute_logsums` method goes through a similar series
-of steps as the interaction_sample function but ends up calling 
-:func:`activitysim.core.simulate.simple_simulate_logsums` since it supports nested logit models, which 
-are required for the mode choice logsum calculation.  The 
-:func:`activitysim.core.simulate.simple_simulate_logsums` returns a vector of logsums (instead of a vector 
-choices). 
+of steps as the interaction_sample function but ends up calling
+:func:`activitysim.core.simulate.simple_simulate_logsums` since it supports nested logit models, which
+are required for the mode choice logsum calculation.  The
+:func:`activitysim.core.simulate.simple_simulate_logsums` returns a vector of logsums (instead of a vector
+choices).
 
-The final school location choice model operates on the ``location_sample_df`` table created 
+The final school location choice model operates on the ``location_sample_df`` table created
 above and is called as follows:
 
-:: 
+::
 
 	  # - location_simulate
 	  choices = \
@@ -411,7 +412,7 @@ above and is called as follows:
 	          segment_name,
 	          choosers,
 	          location_sample_df,
-	          skim_dict,
+	          network_los,
 	          dest_size_terms,
 	          model_settings,
 	          chunk_size,
@@ -419,20 +420,20 @@ above and is called as follows:
 
 	  choices_list.append(choices)
 
-The operations executed by this model are very similar to the earlier models, except 
+The operations executed by this model are very similar to the earlier models, except
 this time the sampled locations table is the choosers and the model selects one alternative for
-each chooser using the school location simulate expression files and the 
-:func:`activitysim.core.interaction_sample_simulate.interaction_sample_simulate` function.  
+each chooser using the school location simulate expression files and the
+:func:`activitysim.core.interaction_sample_simulate.interaction_sample_simulate` function.
 
-Back in ``iterate_location_choice()``, the model adds the choices as a column to the ``persons`` table and adds 
-additional output columns using a postprocessor table annotation if specified in the settings file.  Refer 
-to :ref:`table_annotation` for more information and the :func:`activitysim.abm.models.util.expressions.assign_columns` 
-function.  The overall school location model is run within a shadow pricing iterative loop as shown below.  Refer 
+Back in ``iterate_location_choice()``, the model adds the choices as a column to the ``persons`` table and adds
+additional output columns using a postprocessor table annotation if specified in the settings file.  Refer
+to :ref:`table_annotation` for more information and the :func:`activitysim.abm.models.util.expressions.assign_columns`
+function.  The overall school location model is run within a shadow pricing iterative loop as shown below.  Refer
 to :ref:`shadow_pricing` for more information.
 
-:: 
+::
 
-   
+
    # in iterate_location_choice() in location_choice.py
 	 for iteration in range(1, max_iterations + 1):
 
@@ -441,7 +442,7 @@ to :ref:`shadow_pricing` for more information.
 
         choices = run_location_choice(
             persons_merged_df,
-            skim_dict, skim_stack,
+            network_los,
             spc,
             model_settings,
             chunk_size, trace_hh_id,
@@ -486,18 +487,18 @@ to :ref:`shadow_pricing` for more information.
             trace_label=tracing.extend_trace_label(trace_label, 'annotate_persons'))
 
         pipeline.replace_table("persons", persons_df)
-                
 
-Finishing Up 
+
+Finishing Up
 ~~~~~~~~~~~~
 
 The last models to be run by the data pipeline are:
 
 * ``write_data_dictionary``, which writes the table_name, number of rows, number of columns, and number of bytes for each checkpointed table
 * ``track_skim_usage``, which tracks skim data memory usage
-* ``write_tables``, which writes pipeline tables as csv files as specified by the output_tables setting
+* ``write_tables``, which writes pipeline tables as CSV files as specified by the output_tables setting
 
-Back in the main ``simulation.py`` script, the final steps are to:
+Back in the main ``run`` command, the final steps are to:
 
 * close the data pipeline (and attached HDF5 file)
 
@@ -514,16 +515,16 @@ Creating New Tables
 ~~~~~~~~~~~~~~~~~~~
 
 In addition to calculating the mandatory tour frequency for a person, the model must also create mandatory tour records.
-Once the number of tours is known, then the next step is to create tours records for subsequent models.  This is done by the 
-:func:`activitysim.abm.models.util.tour_frequency.process_tours` function, which is called by the 
-:func:`activitysim.abm.models.mandatory_tour_frequency.mandatory_tour_frequency` function, which adds the tours to 
+Once the number of tours is known, then the next step is to create tours records for subsequent models.  This is done by the
+:func:`activitysim.abm.models.util.tour_frequency.process_tours` function, which is called by the
+:func:`activitysim.abm.models.mandatory_tour_frequency.mandatory_tour_frequency` function, which adds the tours to
 the ``tours`` table managed in the data pipeline.  This is the same basic pattern used for creating new tables - tours, trips, etc.
 
 ::
 
   @inject.step()
   def mandatory_tour_frequency(persons_merged, chunk_size, trace_hh_id):
-  
+
     choosers['mandatory_tour_frequency'] = choices
       mandatory_tours = process_mandatory_tours(
         persons=choosers,
@@ -532,57 +533,71 @@ the ``tours`` table managed in the data pipeline.  This is the same basic patter
 
     tours = pipeline.extend_table("tours", mandatory_tours)
 
-  
+
 Vectorized 3D Skim Indexing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The mode choice model uses the :class:`activitysim.core.skim.SkimStackWrapper` class in addition to the skims (2D) 
-class.  The SkimStackWrapper class represents a collection of skims with a third dimension, which in this case 
-is time period.  Setting up the 3D index for SkimStackWrapper is done as follows:
+The mode choice model uses a collection of skims with a third dimension, which in this case
+is time period.  Setting up the 3D index for skims is done as follows:
 
 ::
 
-  # setup three skim keys based on columns in the chooser table
-  # origin, destination, time period; destination, origin, time period; origin, destination
-  odt_skim_stack_wrapper = skim_stack.wrap(left_key='TAZ', right_key='destination', skim_key="out_period")
-  dot_skim_stack_wrapper = skim_stack.wrap(left_key='destination', right_key='TAZ', skim_key="in_period")
-  od_skims               = skim_dict.wrap('TAZ', 'destination')
-  
-  #pass these into simple_simulate so they can be used in expressions
-  locals_d = {
-    "odt_skims": odt_skim_stack_wrapper,
-    "dot_skims": dot_skim_stack_wrapper,
-    "od_skims": od_skim_stack_wrapper
-  }
+    skim_dict = network_los.get_default_skim_dict()
+
+    # setup skim keys
+    orig_col_name = 'home_zone_id'
+    dest_col_name = 'destination'
+
+    out_time_col_name = 'start'
+    in_time_col_name = 'end'
+    odt_skim_stack_wrapper = skim_dict.wrap_3d(orig_key=orig_col_name, dest_key=dest_col_name,
+                                               dim3_key='out_period')
+    dot_skim_stack_wrapper = skim_dict.wrap_3d(orig_key=dest_col_name, dest_key=orig_col_name,
+                                               dim3_key='in_period')
+    odr_skim_stack_wrapper = skim_dict.wrap_3d(orig_key=orig_col_name, dest_key=dest_col_name,
+                                               dim3_key='in_period')
+    dor_skim_stack_wrapper = skim_dict.wrap_3d(orig_key=dest_col_name, dest_key=orig_col_name,
+                                               dim3_key='out_period')
+    od_skim_stack_wrapper = skim_dict.wrap(orig_col_name, dest_col_name)
+
+    skims = {
+        "odt_skims": odt_skim_stack_wrapper,
+        "dot_skims": dot_skim_stack_wrapper,
+        "od_skims": od_skim_stack_wrapper,
+        'orig_col_name': orig_col_name,
+        'dest_col_name': dest_col_name,
+        'out_time_col_name': out_time_col_name,
+        'in_time_col_name': in_time_col_name
+    }
 
 When model expressions such as ``@odt_skims['WLK_LOC_WLK_TOTIVT']`` are solved,
-the ``WLK_LOC_WLK_TOTIVT`` skim matrix values for all chooser table origins, destinations, and 
+the ``WLK_LOC_WLK_TOTIVT`` skim matrix values for all chooser table origins, destinations, and
 out_periods can be retrieved in one vectorized request.
 
-All the skims are preloaded (cached) by the pipeline manager at the beginning of the model 
+All the skims are preloaded (cached) by the pipeline manager at the beginning of the model
 run in order to avoid repeatedly reading the skims from the OMX files on disk.  This saves
 significant model runtime.
 
-See :ref:`skims_in_detail` for more information on skim handling.
+See :ref:`los_in_detail` for more information on skim handling.
 
 Accessibilities Model
 ~~~~~~~~~~~~~~~~~~~~~
 
-Unlike the microsimulation models, which operate on a table of choosers, the accessibilities model is 
-an aggregate model that calculates accessibility measures by origin zone to all destination zones.  This 
-model could be implemented with a matrix library such as numpy since it involves a series of matrix 
-and vector operations.  However, all the other ActivitySim AB models - the 
-microsimulation models - are implemented with pandas.DataFrame tables, and so this would be a 
-different approach for just this model.  The benefits of keeping with the same table approach to 
+Unlike the microsimulation models, which operate on a table of choosers, the accessibilities model is
+an aggregate model that calculates accessibility measures by origin zone to all destination zones.  This
+model could be implemented with a matrix library such as numpy since it involves a series of matrix
+and vector operations.  However, all the other ActivitySim AB models - the
+microsimulation models - are implemented with pandas.DataFrame tables, and so this would be a
+different approach for just this model.  The benefits of keeping with the same table approach to
 data setup, expression management, and solving means ActivitySim has one expression syntax, is
-easier to understand and document, and is more efficiently implemented.  
+easier to understand and document, and is more efficiently implemented.
 
-As illustrated below, in order to convert the 
+As illustrated below, in order to convert the
 accessibility calculation into a table operation, a table of OD pairs is first built using numpy
-``repeat`` and ``tile`` functions.  Once constructed, the additional data columns are added to the 
+``repeat`` and ``tile`` functions.  Once constructed, the additional data columns are added to the
 table in order to solve the accessibility calculations.  The skim data is also added in column form.
 After solving the expressions for each OD pair row, the accessibility module aggregates the results
-to origin zone and write them to the datastore.  
+to origin zone and write them to the datastore.
 
 ::
 
@@ -602,16 +617,16 @@ to origin zone and write them to the datastore.
 Multiprocessing
 ---------------
 
-Most models can be implemented as a series of independent vectorized operations on pandas DataFrames and 
-numpy arrays. These vectorized operations are much faster than sequential Python because they are 
-implemented by native code (compiled C) and are to some extent multi-threaded. But the benefits of 
-numpy multi-processing are limited because they only apply to atomic numpy or pandas calls, and as 
+Most models can be implemented as a series of independent vectorized operations on pandas DataFrames and
+numpy arrays. These vectorized operations are much faster than sequential Python because they are
+implemented by native code (compiled C) and are to some extent multi-threaded. But the benefits of
+numpy multi-processing are limited because they only apply to atomic numpy or pandas calls, and as
 soon as control returns to Python it is single-threaded and slow.
 
 Multi-threading is not an attractive strategy to get around the Python performance problem because
 of the limitations imposed by Python's global interpreter lock (GIL). Rather than struggling with
-Python multi-threading, ActivitySim uses the 
-Python `multiprocessing <https://docs.python.org/2/library/multiprocessing.html>`__ library to parallelize 
+Python multi-threading, ActivitySim uses the
+Python `multiprocessing <https://docs.python.org/2/library/multiprocessing.html>`__ library to parallelize
 most models.
 
 ActivitySim's modular and extensible architecture makes it possible to not hardwire the multiprocessing
@@ -695,7 +710,7 @@ Shared Data
 
 Although multiprocessing subprocesses each have their apportioned pipeline, they also share some
 data passed to them by the parent process:
- 
+
   * read-only shared data such as skim matrices
   * read-write shared memory when needed.  For example when school and work modeled destinations by zone are compared to target zone sizes (as calculated by the size terms).
 
@@ -709,8 +724,8 @@ When multiprocessing is run, the following additional outputs are created, which
   * Pipeline file for each multiprocess step and process, for example ``mp_households_0-pipeline.h5``
   * mem.csv - memory used for each step
   * breadcrumbs.yaml - multiprocess global info
-  
-See the :ref:`multiprocessing_in_detail` section for more detail.  
+
+See the :ref:`multiprocessing_in_detail` section for more detail.
 
 
 .. index:: data tables
@@ -721,7 +736,7 @@ Data Schema
 -----------
 
 The ActivitySim data schema depends on the sub-models implemented.  The data schema listed below is for
-the example model.  These tables and skims are defined in the :mod:`activitysim.abm.tables` package.
+the primary TM1 example model.  These tables and skims are defined in the :mod:`activitysim.abm.tables` package.
 
 .. index:: constants
 .. index:: households
@@ -730,7 +745,7 @@ the example model.  These tables and skims are defined in the :mod:`activitysim.
 .. index:: persons
 .. index:: size terms
 .. index:: time windows table
-.. index:: tours 
+.. index:: tours
 .. index:: trips
 
 Data Tables
@@ -739,7 +754,7 @@ Data Tables
 The following tables are currently implemented:
 
   * households - household attributes for each household being simulated.  Index: ``household_id`` (see ``activitysim.abm.tables.households.py``)
-  * landuse - zonal land use (such as population and employment) attributes. Index: ``TAZ`` (see ``activitysim.abm.tables.landuse.py``)
+  * landuse - zonal land use (such as population and employment) attributes. Index: ``zone_id`` (see ``activitysim.abm.tables.landuse.py``)
   * persons - person attributes for each person being simulated.  Index: ``person_id`` (see ``activitysim.abm.tables.persons.py``)
   * time windows - manages person time windows throughout the simulation.  See :ref:`time_windows`.  Index:  ``person_id`` (see the person_windows table create decorator in ``activitysim.abm.tables.time_windows.py``)
   * tours - tour attributes for each tour (mandatory, non-mandatory, joint, and atwork-subtour) being simulated.  Index:  ``tour_id`` (see ``activitysim.abm.models.util.tour_frequency.py``)
@@ -749,17 +764,17 @@ A few additional tables are also used, which are not really tables, but classes:
 
   * input store - reads input data tables from the input data store
   * constants - various constants used throughout the model system, such as person type codes
-  * shadow pricing - shadow price calculator and associated utility methods, see :ref:`shadow_pricing` 
+  * shadow pricing - shadow price calculator and associated utility methods, see :ref:`shadow_pricing`
   * size terms - created by reading the ``destination_choice_size_terms.csv`` input file.  Index - ``segment`` (see ``activitysim.abm.tables.size_terms.py``)
-  * skims - see :ref:`skims` 
+  * skims - see :ref:`skims`
   * table dictionary - stores which tables should be registered as random number generator channels for restartability of the pipeline
-  
+
 Data Schema
 ~~~~~~~~~~~
 
-The following table lists the pipeline data tables, each final field, the data type, the step that created it, and the  
-number of columns and rows in the table at the time of creation.  The ``scripts\make_pipeline_output.py`` script 
-uses the information stored in the pipeline file to create the table below for a small sample of households.  
+The following table lists the pipeline data tables, each final field, the data type, the step that created it, and the
+number of columns and rows in the table at the time of creation.  The ``other_resources\scripts\make_pipeline_output.py`` script
+uses the information stored in the pipeline file to create the table below for a small sample of households.
 
 +----------------------------+-------------------------------+---------+------------------------------+------+------+
 | Table                      | Field                         | DType   | Creator                      |NCol  |NRow  |
@@ -1168,7 +1183,7 @@ uses the information stored in the pipeline file to create the table below for a
 +----------------------------+-------------------------------+---------+------------------------------+------+------+
 | persons                    | workplace_in_cbd              | bool    | workplace_location           | 52   | 271  |
 +----------------------------+-------------------------------+---------+------------------------------+------+------+
-| persons                    | work_taz_area_type            | float64 | workplace_location           | 52   | 271  |
+| persons                    | work_zone_area_type           | float64 | workplace_location           | 52   | 271  |
 +----------------------------+-------------------------------+---------+------------------------------+------+------+
 | persons                    | roundtrip_auto_time_to_work   | float32 | workplace_location           | 52   | 271  |
 +----------------------------+-------------------------------+---------+------------------------------+------+------+
@@ -1326,30 +1341,61 @@ uses the information stored in the pipeline file to create the table below for a
 Skims
 ~~~~~
 
-The skims class defines orca injectables to access the skim matrices.  The skims class reads the
+The skims class defines Inject injectables to access the skim matrices.  The skims class reads the
 skims from the omx_file on disk.  The injectables and omx_file for the example are listed below.
 The skims are float64 matrix.
 
-+-------------+-----------------+------------------------------------------------------------------------+
-|       Table |            Type |                                            Creation                    |
-+=============+=================+========================================================================+
-|   skim_dict |        SkimDict | skims.py defines skim_dict which reads omx_file                        |
-+-------------+-----------------+------------------------------------------------------------------------+
-|  skim_stack |       SkimStack | skims.py defines skim_stack which calls skim_dict which reads omx_file |
-+-------------+-----------------+------------------------------------------------------------------------+
+Skims are named <PATH TYPE>_<MEASURE>__<TIME PERIOD>:
 
-Skims are named <PATHTYPE>_<MEASURE>__<TIME PERIOD>:
+* Highway paths:
 
-* Highway paths are SOV, HOV2, HOV3, SOVTOLL, HOV2TOLL, HOV3TOLL
-* Transit paths are:
+  * SOV - SOV free
+  * HOV2 - HOV2 free
+  * HOV3 - HOV3 free
+  * SOVTOLL - SOV toll
+  * HOV2TOLL - HOV2 toll
+  * HOV3TOLL - HOV3 toll
+  
+* Transit paths:
 
   * Walk access and walk egress - WLK_COM_WLK, WLK_EXP_WLK, WLK_HVY_WLK, WLK_LOC_WLK, WLK_LRF_WLK
   * Walk access and drive egress - WLK_COM_DRV, WLK_EXP_DRV, WLK_HVY_DRV, WLK_LOC_DRV, WLK_LRF_DRV
   * Drive access and walk egress - DRV_COM_WLK, DRV_EXP_WLK, DRV_HVY_WLK, DRV_LOC_WLK, DRV_LRF_WLK
   * COM = commuter rail, EXP = express bus, HVY = heavy rail, LOC = local bus, LRF = light rail ferry
-  
-* Non-motorized paths are WALK, BIKE
-* Time periods are EA, AM, MD, PM, EV
+
+* Non-motorized paths:
+
+  * WALK
+  * BIKE
+
+* Measures:
+
+  * TIME - Time (minutes)
+  * DIST - Distance (miles)
+  * BTOLL - Bridge toll (cents)
+  * VTOLL - Value toll (cents)
+
+  * IVT - In-vehicle time, time (minutes x 100)
+  * IWAIT - Initial wait time, time (minutes x 100)
+  * XWAIT - Transfer wait time, time (minutes x 100)
+  * WACC - Walk access time, time (minutes x 100)
+  * WAUX - Auxiliary walk time, time (minutes x 100)
+  * WEGR - Walk egress time, time (minutes x 100)
+  * DTIM - Drive access and/or egress time, time (minutes x 100)
+  * DDIST - Drive access and/or egress distance, distance (miles x 100)
+  * FAR - Fare, cents
+  * BOARDS - Boardings, number
+  * TOTIVT - Total in-vehicle time, time (minutes x 100)
+  * KEYIVT - Transit submode in-vehicle time, time (minutes x 100)
+  * FERRYIVT - Ferry in-vehicle time, time (minutes x 100)
+
+* Time periods:
+
+  * EA
+  * AM
+  * MD
+  * PM
+  * EV
 
 +------------------------------+-----------------+
 |                        Field |            Type |
@@ -1564,11 +1610,11 @@ Skims are named <PATHTYPE>_<MEASURE>__<TIME PERIOD>:
 +------------------------------+-----------------+
 |           HOV3TOLL_VTOLL__PM |  float64 matrix |
 +------------------------------+-----------------+
-|                    \DIST__\  |  float64 matrix |
+|                    \DIST\    |  float64 matrix |
 +------------------------------+-----------------+
-|                \DISTWALK__\  |  float64 matrix |
+|                \DISTWALK\    |  float64 matrix |
 +------------------------------+-----------------+
-|                \DISTBIKE__\  |  float64 matrix |
+|                \DISTBIKE\    |  float64 matrix |
 +------------------------------+-----------------+
 |         DRV_COM_WLK_WAIT__AM |  float64 matrix |
 +------------------------------+-----------------+
