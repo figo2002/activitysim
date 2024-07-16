@@ -1,26 +1,22 @@
 # ActivitySim
 # See full license in LICENSE.txt.
-import os
-import logging
-import pkg_resources
+from __future__ import annotations
 
-import openmatrix as omx
+import logging
+import os
+
 import numpy as np
 import numpy.testing as npt
-
+import openmatrix as omx
 import pandas as pd
 import pandas.testing as pdt
+import pkg_resources
 import pytest
 import yaml
 
-from activitysim.core import random
-from activitysim.core import tracing
-from activitysim.core import pipeline
-from activitysim.core import inject
-from activitysim.core import config
+from activitysim.core import config, configuration, random, tracing, workflow
 
 from .setup_utils import setup_dirs
-from .setup_utils import inject_settings
 
 # set the max households for all tests (this is to limit memory use on travis)
 HOUSEHOLDS_SAMPLE_SIZE = 50
@@ -37,13 +33,8 @@ SKIP_FULL_RUN = False
 
 
 def example_path(dirname):
-    resource = os.path.join('examples', 'example_mtc', dirname)
-    return pkg_resources.resource_filename('activitysim', resource)
-
-
-def teardown_function(func):
-    inject.clear_cache()
-    inject.reinject_decorated_tables()
+    resource = os.path.join("examples", "prototype_mtc", dirname)
+    return pkg_resources.resource_filename("activitysim", resource)
 
 
 def close_handlers():
@@ -56,44 +47,43 @@ def close_handlers():
 
 
 def test_load_cached_accessibility():
-
-    inject.clear_cache()
-    inject.reinject_decorated_tables()
-
-    data_dir = [os.path.join(os.path.dirname(__file__), 'data'), example_path('data')]
-    setup_dirs(data_dir=data_dir)
+    data_dir = [os.path.join(os.path.dirname(__file__), "data"), example_path("data")]
+    state = setup_dirs(data_dir=data_dir)
 
     #
     # add OPTIONAL ceched table accessibility to input_table_list
     # activitysim.abm.tables.land_use.accessibility() will load this table if listed here
     # presumably independently calculated outside activitysim or a cached copy created during a previous run
     #
-    settings = config.read_settings_file('settings.yaml', mandatory=True)
-    input_table_list = settings.get('input_table_list')
-    input_table_list.append({
-        'tablename': 'accessibility',
-        'filename': 'cached_accessibility.csv',
-        'index_col': 'zone_id'
-    })
-    inject_settings(households_sample_size=HOUSEHOLDS_SAMPLE_SIZE,
-                    input_table_list=input_table_list
-                    )
+    settings = state.settings
+    input_table_list = settings.input_table_list
+    input_table_list.append(
+        configuration.InputTable.model_validate(
+            {
+                "tablename": "accessibility",
+                "filename": "cached_accessibility.csv",
+                "index_col": "zone_id",
+            }
+        )
+    )
+    state.settings.households_sample_size = HOUSEHOLDS_SAMPLE_SIZE
+    state.settings.input_table_list = input_table_list
 
     _MODELS = [
-        'initialize_landuse',
+        "initialize_landuse",
         # 'compute_accessibility',  # we load accessibility table ordinarily created by compute_accessibility
-        'initialize_households',
+        "initialize_households",
     ]
 
-    pipeline.run(models=_MODELS, resume_after=None)
+    try:
+        state.run(models=_MODELS, resume_after=None)
 
-    accessibility_df = pipeline.get_table("accessibility")
+        accessibility_df = state.checkpoint.load_dataframe("accessibility")
 
-    assert 'auPkRetail' in accessibility_df
+        assert "auPkRetail" in accessibility_df
 
-    pipeline.close_pipeline()
-    inject.clear_cache()
-    close_handlers()
+    finally:
+        close_handlers()
 
 
 if __name__ == "__main__":

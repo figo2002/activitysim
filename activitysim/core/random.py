@@ -1,24 +1,23 @@
 # ActivitySim
 # See full license in LICENSE.txt.
+from __future__ import annotations
 
-from builtins import range
-from builtins import object
-
-import logging
 import hashlib
+import logging
+from builtins import object, range
 
 import numpy as np
 import pandas as pd
+
 from activitysim.core.util import reindex
 
 from .tracing import print_elapsed_time
 
-
 logger = logging.getLogger(__name__)
 
 # one more than 0xFFFFFFFF so we can wrap using: int64 % _MAX_SEED
-_MAX_SEED = (1 << 32)
-_SEED_MASK = 0xffffffff
+_MAX_SEED = 1 << 32
+_SEED_MASK = 0xFFFFFFFF
 
 
 def hash32(s):
@@ -32,7 +31,7 @@ def hash32(s):
     -------
         32 bit unsigned hash
     """
-    s = s.encode('utf8')
+    s = s.encode("utf8")
     h = hashlib.md5(s).hexdigest()
     return int(h, base=16) & _SEED_MASK
 
@@ -68,7 +67,6 @@ class SimpleChannel(object):
     """
 
     def __init__(self, channel_name, base_seed, domain_df, step_name):
-
         self.base_seed = base_seed
 
         # ensure that every channel is different, even for the same df index values and max_steps
@@ -102,14 +100,12 @@ class SimpleChannel(object):
         assert self.step_name
 
         if self.step_name and not row_states.empty:
-
-            row_states['row_seed'] = (self.base_seed +
-                                      self.channel_seed +
-                                      self.step_seed +
-                                      row_states.index) % _MAX_SEED
+            row_states["row_seed"] = (
+                self.base_seed + self.channel_seed + self.step_seed + row_states.index
+            ) % _MAX_SEED
 
             # number of rands pulled this step
-            row_states['offset'] = 0
+            row_states["offset"] = 0
 
         return row_states
 
@@ -128,10 +124,12 @@ class SimpleChannel(object):
         """
 
         if domain_df.empty:
-            logger.warning("extend_domain for channel %s for empty domain_df" % self.channel_name)
+            logger.warning(
+                "extend_domain for channel %s for empty domain_df" % self.channel_name
+            )
 
         # dataframe to hold state for every df row
-        row_states = pd.DataFrame(columns=['row_seed', 'offset'], index=domain_df.index)
+        row_states = pd.DataFrame(columns=["row_seed", "offset"], index=domain_df.index)
 
         if self.step_name and not row_states.empty:
             self.init_row_states_for_step(row_states)
@@ -165,13 +163,12 @@ class SimpleChannel(object):
         self.multi_choice_offset = None
 
     def end_step(self, step_name):
-
         assert self.step_name == step_name
 
         self.step_name = None
         self.step_seed = None
-        self.row_states['offset'] = 0
-        self.row_states['row_seed'] = 0
+        self.row_states["offset"] = 0
+        self.row_states["row_seed"] = 0
 
     def _generators_for_df(self, df):
         """
@@ -198,7 +195,6 @@ class SimpleChannel(object):
 
         prng = np.random.RandomState()
         for row in df_row_states.itertuples():
-
             prng.seed(row.row_seed)
 
             if row.offset:
@@ -245,10 +241,10 @@ class SimpleChannel(object):
 
         rands = np.asanyarray([prng.rand(n) for prng in generators])
         # update offset for rows we handled
-        self.row_states.loc[df.index, 'offset'] += n
+        self.row_states.loc[df.index, "offset"] += n
         return rands
 
-    def normal_for_df(self, df, step_name, mu, sigma, lognormal=False):
+    def normal_for_df(self, df, step_name, mu, sigma, lognormal=False, size=None):
         """
         Return a floating point random number in normal (or lognormal) distribution
         for each row in df using the appropriate random channel for each row.
@@ -295,16 +291,26 @@ class SimpleChannel(object):
         sigma = to_series(sigma)
 
         if lognormal:
-            rands = \
-                np.asanyarray([prng.lognormal(mean=mu[i], sigma=sigma[i])
-                               for i, prng in enumerate(generators)])
+            rands = np.asanyarray(
+                [
+                    prng.lognormal(mean=mu[i], sigma=sigma[i], size=size)
+                    for i, prng in enumerate(generators)
+                ]
+            )
         else:
-            rands = \
-                np.asanyarray([prng.normal(loc=mu[i], scale=sigma[i])
-                               for i, prng in enumerate(generators)])
+            rands = np.asanyarray(
+                [
+                    prng.normal(loc=mu[i], scale=sigma[i], size=size)
+                    for i, prng in enumerate(generators)
+                ]
+            )
 
         # update offset for rows we handled
-        self.row_states.loc[df.index, 'offset'] += 1
+        if size is not None:
+            consume_offsets = int(size)
+        else:
+            consume_offsets = 1
+        self.row_states.loc[df.index, "offset"] += consume_offsets
 
         return rands
 
@@ -350,22 +356,22 @@ class SimpleChannel(object):
         # initialize the generator iterator
         generators = self._generators_for_df(df)
 
-        sample = np.concatenate(tuple(prng.choice(a, size, replace) for prng in generators))
+        sample = np.concatenate(
+            tuple(prng.choice(a, size, replace) for prng in generators)
+        )
 
         if not self.multi_choice_offset:
             # FIXME - if replace, should we estimate rands_consumed?
             if replace:
                 logger.warning("choice_for_df MULTI_CHOICE_FF with replace")
             # update offset for rows we handled
-            self.row_states.loc[df.index, 'offset'] += size
+            self.row_states.loc[df.index, "offset"] += size
 
         return sample
 
 
 class Random(object):
-
     def __init__(self):
-
         self.channels = {}
 
         # dict mapping df index name to channel name
@@ -405,7 +411,8 @@ class Random(object):
             pipeline step name
         """
 
-        assert self.step_name is None
+        if self.step_name is not None:
+            raise ValueError(f"already in step {self.step_name}")
         assert step_name is not None
 
         self.step_name = step_name
@@ -428,7 +435,9 @@ class Random(object):
         step_name : str
             name of current step (just a consistency check)
         """
-        assert self.step_name is not None
+        if self.step_name is None:
+            # maybe a step was aborted, this is fine
+            return
         assert self.step_name == step_name
 
         for c in self.channels:
@@ -460,22 +469,23 @@ class Random(object):
         """
 
         if channel_name in self.channels:
-
             assert channel_name == self.index_to_channel[domain_df.index.name]
-            logger.debug("Random: extending channel '%s' %s ids" %
-                         (channel_name, len(domain_df.index)))
+            logger.debug(
+                "Random: extending channel '%s' %s ids"
+                % (channel_name, len(domain_df.index))
+            )
             channel = self.channels[channel_name]
 
             channel.extend_domain(domain_df)
 
         else:
-            logger.debug("Adding channel '%s' %s ids" % (channel_name, len(domain_df.index)))
+            logger.debug(
+                "Adding channel '%s' %s ids" % (channel_name, len(domain_df.index))
+            )
 
-            channel = SimpleChannel(channel_name,
-                                    self.base_seed,
-                                    domain_df,
-                                    self.step_name
-                                    )
+            channel = SimpleChannel(
+                channel_name, self.base_seed, domain_df, self.step_name
+            )
 
             self.channels[channel_name] = channel
             self.index_to_channel[domain_df.index.name] = channel_name
@@ -490,10 +500,12 @@ class Random(object):
         """
 
         if channel_name in self.channels:
-            logger.debug("Dropping channel '%s'" % (channel_name, ))
+            logger.debug("Dropping channel '%s'" % (channel_name,))
             del self.channels[channel_name]
         else:
-            logger.error("drop_channel called with unknown channel '%s'" % (channel_name,))
+            logger.error(
+                "drop_channel called with unknown channel '%s'" % (channel_name,)
+            )
 
     def set_base_seed(self, seed=None):
         """
@@ -521,7 +533,7 @@ class Random(object):
         assert len(list(self.channels.keys())) == 0
 
         if seed is None:
-            self.base_seed = np.random.RandomState().randint(_MAX_SEED)
+            self.base_seed = np.random.RandomState().randint(_MAX_SEED, dtype=np.uint32)
             logger.debug("Set random seed randomly to %s" % self.base_seed)
         else:
             logger.debug("Set random seed base to %s" % seed)
@@ -602,7 +614,7 @@ class Random(object):
         rands = channel.random_for_df(df, self.step_name, n)
         return rands
 
-    def normal_for_df(self, df, mu=0, sigma=1, broadcast=False):
+    def normal_for_df(self, df, mu=0, sigma=1, broadcast=False, size=None):
         """
         Return a single floating point normal random number in range (-inf, inf) for each row in df
         using the appropriate random channel for each row.
@@ -640,11 +652,18 @@ class Random(object):
         if broadcast:
             alts_df = df
             df = df.index.unique().to_series()
-            rands = channel.normal_for_df(df, self.step_name, mu=0, sigma=1, lognormal=False)
-            rands = reindex(pd.Series(rands, index=df.index), alts_df.index)
-            rands = rands*sigma + mu
+            rands = channel.normal_for_df(
+                df, self.step_name, mu=0, sigma=1, lognormal=False, size=size
+            )
+            if size is not None:
+                rands = reindex(pd.DataFrame(rands, index=df.index), alts_df.index)
+            else:
+                rands = reindex(pd.Series(rands, index=df.index), alts_df.index)
+            rands = rands * sigma + mu
         else:
-            rands = channel.normal_for_df(df, self.step_name, mu, sigma, lognormal=False)
+            rands = channel.normal_for_df(
+                df, self.step_name, mu, sigma, lognormal=False, size=size
+            )
 
         return rands
 
@@ -703,7 +722,9 @@ class Random(object):
             rands = np.exp(rands)
         else:
             channel = self.get_channel_for_df(df)
-            rands = channel.normal_for_df(df, self.step_name, mu=mu, sigma=sigma, lognormal=True)
+            rands = channel.normal_for_df(
+                df, self.step_name, mu=mu, sigma=sigma, lognormal=True
+            )
 
         return rands
 
@@ -746,11 +767,15 @@ class Random(object):
         # FIXME - for tests
         if not self.channels:
             rng = np.random.RandomState(0)
-            choices = np.concatenate(tuple(rng.choice(a, size, replace) for _ in range(len(df))))
+            choices = np.concatenate(
+                tuple(rng.choice(a, size, replace) for _ in range(len(df)))
+            )
             return choices
 
         t0 = print_elapsed_time()
         channel = self.get_channel_for_df(df)
         choices = channel.choice_for_df(df, self.step_name, a, size, replace)
-        t0 = print_elapsed_time("choice_for_df for %s rows" % len(df.index), t0, debug=True)
+        t0 = print_elapsed_time(
+            "choice_for_df for %s rows" % len(df.index), t0, debug=True
+        )
         return choices

@@ -1,57 +1,54 @@
 # ActivitySim
 # See full license in LICENSE.txt.
 
-import sys
 import logging
+import sys
 
-from activitysim.core import mem
-from activitysim.core import inject
-from activitysim.core import tracing
-from activitysim.core import config
-from activitysim.core import pipeline
-from activitysim.core import mp_tasks
-from activitysim.core import chunk
+from activitysim.core import chunk, config, mem, mp_tasks, tracing, workflow
 
 # from activitysim import abm
 
 
-logger = logging.getLogger('activitysim')
+logger = logging.getLogger("activitysim")
 
 
-def cleanup_output_files():
+def cleanup_output_files(state: workflow.State):
 
-    active_log_files = \
-        [h.baseFilename for h in logger.root.handlers if isinstance(h, logging.FileHandler)]
-    tracing.delete_output_files('log', ignore=active_log_files)
+    active_log_files = [
+        h.baseFilename
+        for h in logger.root.handlers
+        if isinstance(h, logging.FileHandler)
+    ]
+    state.tracing.delete_output_files("log", ignore=active_log_files)
 
-    tracing.delete_output_files('h5')
-    tracing.delete_output_files('csv')
-    tracing.delete_output_files('txt')
-    tracing.delete_output_files('yaml')
-    tracing.delete_output_files('prof')
-    tracing.delete_output_files('omx')
+    state.tracing.delete_output_files("h5")
+    state.tracing.delete_output_files("csv")
+    state.tracing.delete_output_files("txt")
+    state.tracing.delete_output_files("yaml")
+    state.tracing.delete_output_files("prof")
+    state.tracing.delete_output_files("omx")
 
 
 def run(run_list, injectables=None):
 
-    if run_list['multiprocess']:
+    if run_list["multiprocess"]:
         logger.info("run multiprocess simulation")
         mp_tasks.run_multiprocess(run_list, injectables)
     else:
         logger.info("run single process simulation")
-        pipeline.run(models=run_list['models'], resume_after=run_list['resume_after'])
-        pipeline.close_pipeline()
+        pipeline.run(models=run_list["models"], resume_after=run_list["resume_after"])
+        pipeline.checkpoint.close_store()
         mem.log_global_hwm()
 
 
 def log_settings(injectables):
 
     settings = [
-        'households_sample_size',
-        'chunk_size',
-        'multiprocess',
-        'num_processes',
-        'resume_after',
+        "households_sample_size",
+        "chunk_size",
+        "multiprocess",
+        "num_processes",
+        "resume_after",
     ]
 
     for k in settings:
@@ -61,29 +58,33 @@ def log_settings(injectables):
         logger.info("injectable %s: %s" % (k, inject.get_injectable(k)))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
-    inject.add_injectable('data_dir', 'data')
-    inject.add_injectable('configs_dir', 'configs')
+    state.add_injectable("data_dir", "data")
+    state.add_injectable("configs_dir", "configs")
 
-    config.handle_standard_args()
+    from activitysim.cli.run import handle_standard_args
+
+    handle_standard_args(state, None)
 
     config.filter_warnings()
-    tracing.config_logger()
+    state.config_logger()
 
     # log_settings(injectables)
 
     t0 = tracing.print_elapsed_time()
 
     # cleanup if not resuming
-    if not config.setting('resume_after', False):
-        cleanup_output_files()
+    if not state.settings.resume_after:
+        cleanup_output_files(state)
 
-    run_list = mp_tasks.get_run_list()
+    run_list = mp_tasks.get_run_list(state)
 
-    if run_list['multiprocess']:
+    if run_list["multiprocess"]:
         # do this after config.handle_standard_args, as command line args may override injectables
-        injectables = list(set(injectables) | set(['data_dir', 'configs_dir', 'output_dir']))
+        injectables = list(
+            set(injectables) | set(["data_dir", "configs_dir", "output_dir"])
+        )
         injectables = {k: inject.get_injectable(k) for k in injectables}
     else:
         injectables = None
